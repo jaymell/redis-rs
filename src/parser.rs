@@ -117,6 +117,7 @@ where
             let error = || {
                 line().map(|line: &str| {
                     let desc = "An error was signalled by the server";
+                    println!("Raw error received from server: ~~{}~~", line);
                     let mut pieces = line.splitn(2, ' ');
                     let kind = match pieces.next().unwrap() {
                         "ERR" => ErrorKind::ResponseError,
