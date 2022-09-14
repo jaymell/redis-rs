@@ -117,6 +117,7 @@ where
             let error = || {
                 line().map(|line: &str| {
                     let desc = "An error was signalled by the server";
+                    println!("Raw error: {}", line);
                     let mut pieces = line.splitn(2, ' ');
                     let kind = match pieces.next().unwrap() {
                         "ERR" => ErrorKind::ResponseError,
@@ -132,6 +133,7 @@ where
                         "READONLY" => ErrorKind::ReadOnly,
                         code => return make_extension_error(code, pieces.next()),
                     };
+                    println!("Kind {:?}", kind);
                     match pieces.next() {
                         Some(detail) => RedisError::from((kind, desc, detail.to_string())),
                         None => RedisError::from((kind, desc)),

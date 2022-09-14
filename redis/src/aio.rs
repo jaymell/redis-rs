@@ -14,6 +14,7 @@ use std::task::{self, Poll};
 use combine::{parser::combinator::AnySendSyncPartialState, stream::PointerOffset};
 
 use ::tokio::{
+    time::{timeout, Duration},
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::lookup_host,
     sync::{mpsc, oneshot},
@@ -841,6 +842,18 @@ where
             })
             .await
             .map_err(|_| None)?;
+
+        // let res = timeout(Duration::from_millis(200), receiver).await
+        //     .map_err( |_|
+        //     RedisError::from(io::Error::new(
+        //         io::ErrorKind::TimedOut,
+        //         "redis_cluster: command timed out",
+        //     )));
+        // match res {
+        //     Ok(result) => match result {
+        //         Ok(nested) => nested.map_err(Some),
+        //         Err(e) => Err(None),
+        //     }
         match receiver.await {
             Ok(result) => result.map_err(Some),
             Err(_) => {
