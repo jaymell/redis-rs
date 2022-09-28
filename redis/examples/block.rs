@@ -1,5 +1,5 @@
-use redis::streams::{StreamReadOptions, StreamKey, StreamReadReply};
-use redis::{self, transaction, Commands, Cmd};
+use redis::streams::{StreamKey, StreamReadOptions, StreamReadReply};
+use redis::{self, transaction, Cmd, Commands};
 
 use std::collections::HashMap;
 use std::env;
@@ -160,18 +160,17 @@ const WORKERS_GROUP: &str = "test-group";
 /// for messages instead of having them evenly distributed.
 const WORKER_CONSUMER: &str = "test-consumer";
 
-
 fn main() {
     // at this point the errors are fatal, let's just fail hard.
-    let url = 
-        "redis://127.0.0.1:6379/";
+    let url = "redis://127.0.0.1:6379/";
 
     let client = redis::Client::open(url).unwrap();
     let mut con = client.get_connection().unwrap();
-    con.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+    con.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+        .unwrap();
 
     let cmd = Cmd::xread_options(
-        &["test-queue" ],
+        &["test-queue"],
         &[">"],
         &StreamReadOptions::default()
             .group(WORKERS_GROUP, WORKER_CONSUMER)
@@ -180,5 +179,4 @@ fn main() {
     );
     let k: StreamReadReply = cmd.query(&mut con).unwrap();
     println!("{:?}", k);
-
 }

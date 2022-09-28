@@ -14,10 +14,10 @@ use std::task::{self, Poll};
 use combine::{parser::combinator::AnySendSyncPartialState, stream::PointerOffset};
 
 use ::tokio::{
-    time::{timeout, Duration},
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::lookup_host,
     sync::{mpsc, oneshot},
+    time::{timeout, Duration},
 };
 
 #[cfg(feature = "tls")]
@@ -721,6 +721,7 @@ where
         match ready!(self.as_mut().project().sink_stream.poll_ready(cx)) {
             Ok(()) => Ok(()).into(),
             Err(err) => {
+                println!("POLL READY ERR");
                 *self.project().error = Some(err);
                 Ok(()).into()
             }
@@ -759,6 +760,7 @@ where
                 Ok(())
             }
             Err(err) => {
+                println!("REDIS-RS: GOT ERROR -- SENDING IT");
                 let _ = output.send(Err(err));
                 Err(())
             }
@@ -775,6 +777,7 @@ where
             .sink_stream
             .poll_flush(cx)
             .map_err(|err| {
+                println!("POLL FLUSH MAP ERR");
                 self.as_mut().send_result(Err(err));
             }))?;
         self.poll_read(cx)
@@ -843,22 +846,31 @@ where
             .await
             .map_err(|_| None)?;
 
-        // let res = timeout(Duration::from_millis(200), receiver).await
-        //     .map_err( |_|
-        //     RedisError::from(io::Error::new(
-        //         io::ErrorKind::TimedOut,
-        //         "redis_cluster: command timed out",
-        //     )));
-        // match res {
-        //     Ok(result) => match result {
-        //         Ok(nested) => nested.map_err(Some),
-        //         Err(e) => Err(None),
-        //     }
-        match receiver.await {
-            Ok(result) => result.map_err(Some),
-            Err(_) => {
+        let res = timeout(Duration::from_millis(200), receiver)
+            .await
+            .map_err(|_| {
+                RedisError::from(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "redis_cluster: command timed out",
+                ))
+            });
+        match res {
+            Ok(result) => match result {
+                Ok(nested) => {
+                    println!("REDIS-RS: GOT NESTED RESULT");
+                    nested.map_err(Some)
+                }
+                Err(e) => {
+                    println!("REDIS-RS: RECV_ERROR: {}", e);
+                    Err(None)
+                }
+            },
+            // match receiver.await {
+            //     Ok(result) => result.map_err(Some),
+            Err(e) => {
                 // The `sender` was dropped which likely means that the stream part
                 // failed for one reason or another
+                println!("REDIS-RS: {}", e);
                 Err(None)
             }
         }

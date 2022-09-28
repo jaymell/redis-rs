@@ -8,6 +8,6 @@ fn main() {
     let builder = redis::cluster::ClusterClientBuilder::new(v);
     match builder.build() {
         Ok(_) => println!("Ok"),
-        Err(e) => println!("Err")
+        Err(e) => println!("Err"),
     };
 }

@@ -760,6 +760,7 @@ fn get_random_connection<'a>(
     connections: &'a mut HashMap<String, Connection>,
     excludes: Option<&'a HashSet<String>>,
 ) -> (String, &'a mut Connection) {
+    println!("GET RANDOM CONNECTION WAS CALLED");
     let mut rng = thread_rng();
     let addr = match excludes {
         Some(excludes) if excludes.len() < connections.len() => connections
