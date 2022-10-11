@@ -373,12 +373,12 @@ where
         };
         match ready!(future.poll(cx)) {
             (_, Ok(item)) => {
-                // trace!("Ok");
+                tracing::trace!("Ok");
                 self.respond(Ok(item));
                 Next::Done.into()
             }
             (addr, Err(err)) => {
-                // trace!("Request error {}", err);
+                tracing::trace!("Request error {}", err);
 
                 let request = this.request.as_mut().unwrap();
 
@@ -490,7 +490,7 @@ where
                 match result {
                     Ok(conn) => Some((addr, async { conn }.boxed().shared())),
                     Err(e) => {
-                        // trace!("Failed to connect to initial node: {:?}", e);
+                        tracing::trace!("Failed to connect to initial node: {:?}", e);
                         None
                     },
                 }
@@ -604,7 +604,7 @@ where
             .iter()
             .map(|slot_data| (slot_data.end(), slot_data.master().to_string()))
             .collect();
-        // trace!("{:?}", slot_map);
+        tracing::trace!("{:?}", slot_map);
         Ok(slot_map)
     }
 
@@ -662,7 +662,7 @@ where
     ) -> Poll<Result<(), RedisError>> {
         match future.as_mut().poll(cx) {
             Poll::Ready(Ok((slots, connections))) => {
-                // trace!("Recovered with {} connections!", connections.len());
+                tracing::trace!("Recovered with {} connections!", connections.len());
                 self.slots = slots;
                 self.connections = connections;
                 self.state = ConnectionState::PollComplete;
@@ -670,7 +670,7 @@ where
             }
             Poll::Pending => {
                 self.state = ConnectionState::Recover(future);
-                // trace!("Recover not ready");
+                tracing::trace!("Recover not ready");
                 Poll::Pending
             }
             Poll::Ready(Err((err, connections))) => {
@@ -797,7 +797,7 @@ where
     }
 
     fn start_send(mut self: Pin<&mut Self>, msg: Message<C>) -> Result<(), Self::Error> {
-        // trace!("start_send");
+        tracing::trace!("start_send");
         let Message { cmd, sender } = msg;
 
         let excludes = HashSet::new();
@@ -821,7 +821,7 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut task::Context,
     ) -> Poll<Result<(), Self::Error>> {
-        // trace!("poll_complete: {:?}", self.state);
+        tracing::trace!("poll_complete: {:?}", self.state);
         loop {
             self.send_refresh_error();
 
@@ -846,7 +846,7 @@ where
                 ConnectionState::PollComplete => match ready!(self.poll_complete(cx)) {
                     Ok(()) => return Poll::Ready(Ok(())),
                     Err(err) => {
-                        // trace!("Recovering {}", err);
+                        tracing::trace!("Recovering {}", err);
                         self.state = ConnectionState::Recover(Box::pin(self.refresh_slots()));
                     }
                 },
@@ -880,7 +880,7 @@ where
     C: ConnectionLike + Send + 'static,
 {
     fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
-        // trace!("req_packed_command");
+        tracing::trace!("req_packed_command");
         let (sender, receiver) = oneshot::channel();
         Box::pin(async move {
             self.0
@@ -1084,14 +1084,14 @@ async fn get_slots<C>(addr: &str, connection: &mut C, use_tls: bool) -> RedisRes
 where
     C: ConnectionLike,
 {
-    // trace!("get_slots");
+    tracing::trace!("get_slots");
     let mut cmd = Cmd::new();
     cmd.arg("CLUSTER").arg("SLOTS");
     let value = connection.req_packed_command(&cmd).await.map_err(|err| {
-        // trace!("get_slots error: {}", err);
+        tracing::trace!("get_slots error: {}", err);
         err
     })?;
-    // trace!("get_slots -> {:#?}", value);
+    tracing::trace!("get_slots -> {:#?}", value);
     // Parse response.
     let mut result = Vec::with_capacity(2);
 

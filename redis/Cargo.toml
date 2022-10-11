@@ -65,6 +65,8 @@ serde_json = { version = "1.0.82", optional = true }
 # Optional aHash support
 ahash = { version = "0.7.6", optional = true }
 
+tracing = "0.1"
+
 [features]
 default = ["acl", "streams", "geospatial", "script"]
 acl = []
