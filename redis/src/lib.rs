@@ -406,7 +406,7 @@ pub use crate::{
     cmd::AsyncIter, commands::AsyncCommands, parser::parse_redis_value_async, types::RedisFuture,
 };
 
-#[cfg(feature = "tokio-comp")]
+#[cfg(feature = "cluster-async")]
 pub mod cluster_async;
 
 mod macros;

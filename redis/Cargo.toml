@@ -82,6 +82,7 @@ tokio-comp = ["aio", "tokio", "tokio/net"]
 tokio-native-tls-comp = ["tls", "tokio-native-tls"]
 connection-manager = ["arc-swap", "futures", "aio"]
 streams = []
+cluster-async = ["tokio-comp", "cluster", "futures", "futures-util"]
 
 
 [dev-dependencies]

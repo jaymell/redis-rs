@@ -60,21 +60,21 @@ use std::{
     time::Duration,
 };
 
+use crate::{
+    aio::ConnectionLike, Arg, Cmd, ConnectionAddr, ConnectionInfo, ErrorKind, IntoConnectionInfo,
+    RedisError, RedisFuture, RedisResult, Value,
+};
 use crc16::*;
 use futures::{
     future::{self, BoxFuture},
     prelude::*,
     ready, stream,
 };
-// use log::trace;
 use pin_project_lite::pin_project;
 use rand::seq::IteratorRandom;
 use rand::thread_rng;
-use crate::{
-    aio::ConnectionLike, Arg, Cmd, ConnectionAddr, ConnectionInfo, ErrorKind, IntoConnectionInfo,
-    RedisError, RedisFuture, RedisResult, Value,
-};
 use tokio::sync::{mpsc, oneshot};
+use tracing::trace;
 
 const SLOT_SIZE: usize = 16384;
 const DEFAULT_RETRIES: u32 = 16;
@@ -378,7 +378,7 @@ where
                 Next::Done.into()
             }
             (addr, Err(err)) => {
-                tracing::trace!("Request error {}", err);
+                trace!("Request error {}", err);
 
                 let request = this.request.as_mut().unwrap();
 
@@ -477,8 +477,14 @@ where
                         Some(pw) => format!("redis://:{}@{}:{}", pw, host, port),
                         None => format!("redis://{}:{}", host, port),
                     },
-                    ConnectionAddr::TcpTls { ref host, port, insecure } => match &info.redis.password {
-                        Some(pw) if insecure => format!("rediss://:{}@{}:{}/#insecure", pw, host, port),
+                    ConnectionAddr::TcpTls {
+                        ref host,
+                        port,
+                        insecure,
+                    } => match &info.redis.password {
+                        Some(pw) if insecure => {
+                            format!("rediss://:{}@{}:{}/#insecure", pw, host, port)
+                        }
                         Some(pw) => format!("rediss://:{}@{}:{}", pw, host, port),
                         None if insecure => format!("rediss://{}:{}/#insecure", host, port),
                         None => format!("rediss://{}:{}", host, port),
@@ -490,9 +496,9 @@ where
                 match result {
                     Ok(conn) => Some((addr, async { conn }.boxed().shared())),
                     Err(e) => {
-                        tracing::trace!("Failed to connect to initial node: {:?}", e);
+                        trace!("Failed to connect to initial node: {:?}", e);
                         None
-                    },
+                    }
                 }
             })
             .buffer_unordered(initial_nodes.len())
@@ -604,7 +610,7 @@ where
             .iter()
             .map(|slot_data| (slot_data.end(), slot_data.master().to_string()))
             .collect();
-        tracing::trace!("{:?}", slot_map);
+        trace!("{:?}", slot_map);
         Ok(slot_map)
     }
 
@@ -662,7 +668,7 @@ where
     ) -> Poll<Result<(), RedisError>> {
         match future.as_mut().poll(cx) {
             Poll::Ready(Ok((slots, connections))) => {
-                tracing::trace!("Recovered with {} connections!", connections.len());
+                trace!("Recovered with {} connections!", connections.len());
                 self.slots = slots;
                 self.connections = connections;
                 self.state = ConnectionState::PollComplete;
@@ -670,7 +676,7 @@ where
             }
             Poll::Pending => {
                 self.state = ConnectionState::Recover(future);
-                tracing::trace!("Recover not ready");
+                trace!("Recover not ready");
                 Poll::Pending
             }
             Poll::Ready(Err((err, connections))) => {
@@ -797,7 +803,7 @@ where
     }
 
     fn start_send(mut self: Pin<&mut Self>, msg: Message<C>) -> Result<(), Self::Error> {
-        tracing::trace!("start_send");
+        trace!("start_send");
         let Message { cmd, sender } = msg;
 
         let excludes = HashSet::new();
@@ -821,7 +827,7 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut task::Context,
     ) -> Poll<Result<(), Self::Error>> {
-        tracing::trace!("poll_complete: {:?}", self.state);
+        trace!("poll_complete: {:?}", self.state);
         loop {
             self.send_refresh_error();
 
@@ -846,7 +852,7 @@ where
                 ConnectionState::PollComplete => match ready!(self.poll_complete(cx)) {
                     Ok(()) => return Poll::Ready(Ok(())),
                     Err(err) => {
-                        tracing::trace!("Recovering {}", err);
+                        trace!("Recovering {}", err);
                         self.state = ConnectionState::Recover(Box::pin(self.refresh_slots()));
                     }
                 },
@@ -880,7 +886,7 @@ where
     C: ConnectionLike + Send + 'static,
 {
     fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
-        tracing::trace!("req_packed_command");
+        trace!("req_packed_command");
         let (sender, receiver) = oneshot::channel();
         Box::pin(async move {
             self.0
@@ -1084,14 +1090,14 @@ async fn get_slots<C>(addr: &str, connection: &mut C, use_tls: bool) -> RedisRes
 where
     C: ConnectionLike,
 {
-    tracing::trace!("get_slots");
+    trace!("get_slots");
     let mut cmd = Cmd::new();
     cmd.arg("CLUSTER").arg("SLOTS");
     let value = connection.req_packed_command(&cmd).await.map_err(|err| {
-        tracing::trace!("get_slots error: {}", err);
+        trace!("get_slots error: {}", err);
         err
     })?;
-    tracing::trace!("get_slots -> {:#?}", value);
+    trace!("get_slots -> {:#?}", value);
     // Parse response.
     let mut result = Vec::with_capacity(2);
 
