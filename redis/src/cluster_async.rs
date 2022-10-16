@@ -60,6 +60,11 @@ use std::{
     time::Duration,
 };
 
+use crate::{
+    aio::{ConnectionLike, MultiplexedConnection},
+    parse_redis_url, Arg, Cmd, ConnectionAddr, ConnectionInfo, ErrorKind, IntoConnectionInfo,
+    RedisError, RedisFuture, RedisResult, Value,
+};
 use crc16::*;
 use futures::{
     future::{self, BoxFuture},
@@ -70,10 +75,6 @@ use log::trace;
 use pin_project_lite::pin_project;
 use rand::seq::IteratorRandom;
 use rand::thread_rng;
-use crate::{
-    aio::{ConnectionLike, MultiplexedConnection}, Arg, Cmd, ConnectionAddr, ConnectionInfo, ErrorKind, IntoConnectionInfo,
-    RedisError, RedisFuture, RedisResult, Value, parse_redis_url,
-};
 use tokio::sync::{mpsc, oneshot};
 
 const SLOT_SIZE: usize = 16384;
@@ -477,8 +478,14 @@ where
                         Some(pw) => format!("redis://:{}@{}:{}", pw, host, port),
                         None => format!("redis://{}:{}", host, port),
                     },
-                    ConnectionAddr::TcpTls { ref host, port, insecure } => match &info.redis.password {
-                        Some(pw) if insecure => format!("rediss://:{}@{}:{}/#insecure", pw, host, port),
+                    ConnectionAddr::TcpTls {
+                        ref host,
+                        port,
+                        insecure,
+                    } => match &info.redis.password {
+                        Some(pw) if insecure => {
+                            format!("rediss://:{}@{}:{}/#insecure", pw, host, port)
+                        }
                         Some(pw) => format!("rediss://:{}@{}:{}", pw, host, port),
                         None if insecure => format!("rediss://{}:{}/#insecure", host, port),
                         None => format!("rediss://{}:{}", host, port),
@@ -492,7 +499,7 @@ where
                     Err(e) => {
                         trace!("Failed to connect to initial node: {:?}", e);
                         None
-                    },
+                    }
                 }
             })
             .buffer_unordered(initial_nodes.len())
@@ -1181,21 +1188,19 @@ mod tests {
     }
 
     fn command_key(cmd: &[u8]) -> Option<Vec<u8>> {
-        parse_redis_value(cmd)
-            .ok()
-            .and_then(|value| match value {
-                Value::Bulk(mut args) => {
-                    if args.len() >= 2 {
-                        match args.swap_remove(1) {
-                            Value::Data(key) => Some(key),
-                            _ => None,
-                        }
-                    } else {
-                        None
+        parse_redis_value(cmd).ok().and_then(|value| match value {
+            Value::Bulk(mut args) => {
+                if args.len() >= 2 {
+                    match args.swap_remove(1) {
+                        Value::Data(key) => Some(key),
+                        _ => None,
                     }
+                } else {
+                    None
                 }
-                _ => None,
-            })
+            }
+            _ => None,
+        })
     }
 
     #[test]
