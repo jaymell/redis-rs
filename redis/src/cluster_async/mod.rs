@@ -974,7 +974,11 @@ impl Clone for Client {
     }
 }
 
+// FIXME -- does this even need to be public? Should it also have `ConnectionLike` bound?
+/// This trait implements the process of connecting to a redis server
+/// and obtaining a handle for command execution.
 pub trait Connect: Sized {
+    /// Connect to a node, returning handle for command execution. 
     fn connect<'a, T>(info: T) -> RedisFuture<'a, Self>
     where
         T: IntoConnectionInfo + Send + 'a;
