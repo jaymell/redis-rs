@@ -61,7 +61,7 @@ use std::{
 };
 
 use crate::{
-    aio::{ConnectionLike, MultiplexedConnection},
+    aio::{async_std::AsyncStd, ConnectionLike, MultiplexedConnection, RedisRuntime, Runtime},
     parse_redis_url, Arg, Cmd, ConnectionAddr, ConnectionInfo, ErrorKind, IntoConnectionInfo,
     RedisError, RedisFuture, RedisResult, Value,
 };
@@ -151,12 +151,26 @@ where
         Pipeline::new(initial_nodes, retries).await.map(|pipeline| {
             let (tx, mut rx) = mpsc::channel::<Message<_>>(100);
 
-            tokio::spawn(async move {
-                let _ = stream::poll_fn(move |cx| rx.poll_recv(cx))
-                    .map(Ok)
-                    .forward(pipeline)
-                    .await;
-            });
+            match Runtime::locate() {
+                #[cfg(feature = "tokio-comp")]
+                Runtime::Tokio => {
+                    tokio::spawn(async move {
+                        let _ = stream::poll_fn(move |cx| rx.poll_recv(cx))
+                            .map(Ok)
+                            .forward(pipeline)
+                            .await;
+                    });
+                }
+                #[cfg(feature = "async-std-comp")]
+                Runtime::AsyncStd => {
+                    AsyncStd::spawn(async move {
+                        let _ = stream::poll_fn(move |cx| rx.poll_recv(cx))
+                            .map(Ok)
+                            .forward(pipeline)
+                            .await;
+                    });
+                }
+            };
 
             Connection(tx)
         })
@@ -978,7 +992,7 @@ impl Clone for Client {
 /// This trait implements the process of connecting to a redis server
 /// and obtaining a handle for command execution.
 pub trait Connect: Sized {
-    /// Connect to a node, returning handle for command execution. 
+    /// Connect to a node, returning handle for command execution.
     fn connect<'a, T>(info: T) -> RedisFuture<'a, Self>
     where
         T: IntoConnectionInfo + Send + 'a;
@@ -992,7 +1006,12 @@ impl Connect for MultiplexedConnection {
         async move {
             let connection_info = info.into_connection_info()?;
             let client = crate::Client::open(connection_info)?;
-            client.get_multiplexed_tokio_connection().await
+            match Runtime::locate() {
+                #[cfg(feature = "tokio-comp")]
+                Runtime::Tokio => client.get_multiplexed_tokio_connection().await,
+                #[cfg(feature = "async-std-comp")]
+                Runtime::AsyncStd => client.get_multiplexed_async_std_connection().await,
+            }
         }
         .boxed()
     }
