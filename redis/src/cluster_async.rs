@@ -61,7 +61,7 @@ use std::{
 };
 
 use crate::{
-    aio::{ConnectionLike, MultiplexedConnection},
+    aio::{ConnectionLike, MultiplexedConnection, Runtime, async_std::AsyncStd, RedisRuntime},
     parse_redis_url, Arg, Cmd, ConnectionAddr, ConnectionInfo, ErrorKind, IntoConnectionInfo,
     RedisError, RedisFuture, RedisResult, Value,
 };
@@ -151,12 +151,24 @@ where
         Pipeline::new(initial_nodes, retries).await.map(|pipeline| {
             let (tx, mut rx) = mpsc::channel::<Message<_>>(100);
 
-            tokio::spawn(async move {
+            match Runtime::locate() {
+                #[cfg(feature = "tokio-comp")]
+                Runtime::Tokio =>             tokio::spawn(async move {
                 let _ = stream::poll_fn(move |cx| rx.poll_recv(cx))
                     .map(Ok)
                     .forward(pipeline)
                     .await;
-            });
+            }),
+                #[cfg(feature = "async-std-comp")]
+                Runtime::AsyncStd => AsyncStd::spawn(async move {
+                let _ = stream::poll_fn(move |cx| rx.poll_recv(cx))
+                    .map(Ok)
+                    .forward(pipeline)
+                    .await;
+            })
+            }
+
+;
 
             Connection(tx)
         })
@@ -992,7 +1004,13 @@ impl Connect for MultiplexedConnection {
         async move {
             let connection_info = info.into_connection_info()?;
             let client = crate::Client::open(connection_info)?;
-            client.get_multiplexed_tokio_connection().await
+            match Runtime::locate() {
+                #[cfg(feature = "tokio-comp")]
+                Runtime::Tokio => client.get_multiplexed_tokio_connection().await,
+                #[cfg(feature = "async-std-comp")]
+                Runtime::AsyncStd => client.get_multiplexed_async_std_connection().await,
+            }
+
         }
         .boxed()
     }
