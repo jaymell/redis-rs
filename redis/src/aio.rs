@@ -642,6 +642,7 @@ pin_project! {
         sink_stream: T,
         in_flight: VecDeque<InFlight<I, E>>,
         error: Option<E>,
+        redis_errors: VecDeque<E>,
     }
 }
 
@@ -657,6 +658,7 @@ where
             sink_stream,
             in_flight: VecDeque::new(),
             error: None,
+            redis_errors: VecDeque::new(),
         }
     }
 
@@ -677,32 +679,38 @@ where
         }
     }
 
-    fn send_result(self: Pin<&mut Self>, result: Result<I, E>) {
-        let self_ = self.project();
-        let response = {
-            let entry = match self_.in_flight.front_mut() {
-                Some(entry) => entry,
-                None => return,
-            };
-            match result {
-                Ok(item) => {
-                    entry.buffer.push(item);
-                    if entry.response_count > entry.buffer.len() {
-                        // Need to gather more response values
-                        return;
-                    }
-                    Ok(mem::take(&mut entry.buffer))
-                }
-                // If we fail we must respond immediately
-                Err(err) => Err(err),
-            }
+    fn send_result(mut self: Pin<&mut Self>, result: Result<I, E>) {
+        let self_ = self.as_mut().project();
+
+        let entry = match self_.in_flight.front_mut() {
+            Some(entry) => entry,
+            None => return,
         };
 
+        match result {
+            Ok(item) => {
+                entry.buffer.push(item);
+            }
+            Err(err) => {
+                self_.redis_errors.push_back(err);
+            }
+        }
+
+        if (entry.response_count - self_.redis_errors.len()) > entry.buffer.len() {
+            // Need to gather more response values
+            return;
+        }
+
         let entry = self_.in_flight.pop_front().unwrap();
-        // `Err` means that the receiver was dropped in which case it does not
-        // care about the output and we can continue by just dropping the value
-        // and sender
-        entry.output.send(response).ok();
+        let mut redis_errors = mem::take(self_.redis_errors);
+        if !redis_errors.is_empty() {
+            entry
+                .output
+                .send(Err(redis_errors.pop_front().unwrap()))
+                .ok();
+        } else {
+            entry.output.send(Ok(entry.buffer)).ok();
+        }
     }
 }
 
