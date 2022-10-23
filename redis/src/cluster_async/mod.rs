@@ -9,7 +9,7 @@
 //!
 //! # Example
 //! ```rust
-//! use redis_cluster_async::{Client, {Commands, cmd}};
+//! use crate::cluster_async::{Client, {Commands, cmd}};
 //!
 //! #[tokio::main]
 //! async fn main() -> RedisResult<()> {
@@ -27,7 +27,7 @@
 //!
 //! # Pipelining
 //! ```rust
-//! use redis_cluster_async::{Client, pipe};
+//! use crate::cluster_async::{Client, pipe};
 //!
 //! #[tokio::main]
 //! async fn main() -> RedisResult<()> {
@@ -978,7 +978,7 @@ impl Clone for Client {
 /// This trait implements the process of connecting to a redis server
 /// and obtaining a handle for command execution.
 pub trait Connect: Sized {
-    /// Connect to a node, returning handle for command execution. 
+    /// Connect to a node, returning handle for command execution.
     fn connect<'a, T>(info: T) -> RedisFuture<'a, Self>
     where
         T: IntoConnectionInfo + Send + 'a;
