@@ -33,14 +33,11 @@ where
     async_std::task::block_on(f)
 }
 
-#[cfg(any(feature = "cluster", feature = "cluster_async"))]
+#[cfg(any(feature = "cluster", feature = "cluster-async"))]
 mod cluster;
 
-#[cfg(any(feature = "cluster", feature = "cluster_async"))]
+#[cfg(any(feature = "cluster", feature = "cluster-async"))]
 pub use self::cluster::*;
-
-#[cfg(feature = "cluster_async")]
-mod cluster_async;
 
 #[derive(PartialEq)]
 enum ServerType {
