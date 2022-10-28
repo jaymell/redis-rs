@@ -8,11 +8,11 @@
 //! Note that this library is currently not have features of Pubsub.
 //!
 //! # Example
-//! ```rust
-//! use crate::cluster_async::{Client, {Commands, cmd}};
+//! ```rust,no_run
+//! use redis::{Commands, cmd, cluster_async::Client};
 //!
 //! #[tokio::main]
-//! async fn main() -> RedisResult<()> {
+//! async fn main() -> redis::RedisResult<()> {
 //! #   let _ = env_logger::try_init();
 //!     let nodes = vec!["redis://127.0.0.1:7000/", "redis://127.0.0.1:7001/", "redis://127.0.0.1:7002/"];
 //!
@@ -26,11 +26,11 @@
 //! ```
 //!
 //! # Pipelining
-//! ```rust
-//! use crate::cluster_async::{Client, pipe};
+//! ```rust,no_run
+//! use redis::{cluster_async::Client, pipe};
 //!
 //! #[tokio::main]
-//! async fn main() -> RedisResult<()> {
+//! async fn main() -> redis::RedisResult<()> {
 //! #   let _ = env_logger::try_init();
 //!     let nodes = vec!["redis://127.0.0.1:7000/", "redis://127.0.0.1:7001/", "redis://127.0.0.1:7002/"];
 //!

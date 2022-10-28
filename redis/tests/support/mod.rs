@@ -16,6 +16,8 @@ pub fn current_thread_runtime() -> tokio::runtime::Runtime {
     #[cfg(feature = "aio")]
     builder.enable_io();
 
+    builder.enable_time();
+
     builder.build().unwrap()
 }
 
