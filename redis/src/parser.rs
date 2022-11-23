@@ -14,8 +14,8 @@ use combine::{
         combinator::{any_send_sync_partial_state, AnySendSyncPartialState},
         range::{recognize, take},
     },
-    stream::{PointerOffset, RangeStream, StreamErrorFor},
-    ParseError, Parser as _,
+    stream::{uncons, PointerOffset, RangeStream, StreamErrorFor},
+    ParseError, Parser as _, Positioned, StreamOnce,
 };
 
 struct ResultExtend<T, E>(Result<T, E>);
@@ -55,6 +55,40 @@ where
 
 const MAX_RECURSE_DEPTH: usize = 100;
 
+#[derive(Copy, Clone)]
+pub struct LimitedAny<Input>(std::marker::PhantomData<fn(Input) -> Input>, usize);
+
+impl<Input> combine::Parser<Input> for LimitedAny<Input>
+where
+    Input: combine::Stream,
+{
+    type Output = Input::Token;
+    type PartialState = ();
+
+    #[inline]
+    fn parse_lazy(
+        &mut self,
+        input: &mut Input,
+    ) -> combine::ParseResult<Input::Token, Input::Error> {
+        if self.1 < MAX_RECURSE_DEPTH {
+            uncons(input)
+        } else {
+            let error = <Input as StreamOnce>::Error::from_error(
+                input.position(),
+                StreamError::unexpected_static_message("Maximum recursion depth exceeded"),
+            );
+            combine::ParseResult::CommitErr(error)
+        }
+    }
+}
+
+fn limited_any<Input>(count: usize) -> LimitedAny<Input>
+where
+    Input: combine::Stream,
+{
+    LimitedAny(std::marker::PhantomData, count)
+}
+
 fn value<'a, I>(
     count: Option<usize>,
 ) -> impl combine::Parser<I, Output = RedisResult<Value>, PartialState = AnySendSyncPartialState>
@@ -63,105 +97,95 @@ where
     I::Error: combine::ParseError<u8, &'a [u8], I::Position>,
 {
     let count = count.unwrap_or(1);
-
     opaque!(any_send_sync_partial_state(
-        any()
-            .then_partial(move |&mut b| {
-                if b == b'*' && count > MAX_RECURSE_DEPTH {
-                    combine::unexpected_any("Maximum recursion depth exceeded").left()
-                } else {
-                    combine::value(b).right()
-                }
-            })
-            .then_partial(move |&mut b| {
-                let line = || {
-                    recognize(take_until_bytes(&b"\r\n"[..]).with(take(2).map(|_| ()))).and_then(
-                        |line: &[u8]| {
-                            str::from_utf8(&line[..line.len() - 2])
-                                .map_err(StreamErrorFor::<I>::other)
-                        },
-                    )
-                };
-
-                let status = || {
-                    line().map(|line| {
-                        if line == "OK" {
-                            Value::Okay
-                        } else {
-                            Value::Status(line.into())
-                        }
-                    })
-                };
-
-                let int = || {
-                    line().and_then(|line| match line.trim().parse::<i64>() {
-                        Err(_) => Err(StreamErrorFor::<I>::message_static_message(
-                            "Expected integer, got garbage",
-                        )),
-                        Ok(value) => Ok(value),
-                    })
-                };
-
-                let data = || {
-                    int().then_partial(move |size| {
-                        if *size < 0 {
-                            combine::value(Value::Nil).left()
-                        } else {
-                            take(*size as usize)
-                                .map(|bs: &[u8]| Value::Data(bs.to_vec()))
-                                .skip(crlf())
-                                .right()
-                        }
-                    })
-                };
-
-                let bulk = || {
-                    int().then_partial(move |&mut length| {
-                        if length < 0 {
-                            combine::value(Value::Nil).map(Ok).left()
-                        } else {
-                            let length = length as usize;
-                            combine::count_min_max(length, length, value(Some(count + 1)))
-                                .map(|result: ResultExtend<_, _>| result.0.map(Value::Bulk))
-                                .right()
-                        }
-                    })
-                };
-
-                let error = || {
-                    line().map(|line: &str| {
-                        let desc = "An error was signalled by the server";
-                        let mut pieces = line.splitn(2, ' ');
-                        let kind = match pieces.next().unwrap() {
-                            "ERR" => ErrorKind::ResponseError,
-                            "EXECABORT" => ErrorKind::ExecAbortError,
-                            "LOADING" => ErrorKind::BusyLoadingError,
-                            "NOSCRIPT" => ErrorKind::NoScriptError,
-                            "MOVED" => ErrorKind::Moved,
-                            "ASK" => ErrorKind::Ask,
-                            "TRYAGAIN" => ErrorKind::TryAgain,
-                            "CLUSTERDOWN" => ErrorKind::ClusterDown,
-                            "CROSSSLOT" => ErrorKind::CrossSlot,
-                            "MASTERDOWN" => ErrorKind::MasterDown,
-                            "READONLY" => ErrorKind::ReadOnly,
-                            code => return make_extension_error(code, pieces.next()),
-                        };
-                        match pieces.next() {
-                            Some(detail) => RedisError::from((kind, desc, detail.to_string())),
-                            None => RedisError::from((kind, desc)),
-                        }
-                    })
-                };
-
-                combine::dispatch!(b;
-                    b'+' => status().map(Ok),
-                    b':' => int().map(|i| Ok(Value::Int(i))),
-                    b'$' => data().map(Ok),
-                    b'*' => bulk(),
-                    b'-' => error().map(Err),
-                    b => combine::unexpected_any(combine::error::Token(b))
+        limited_any(count).then_partial(move |&mut b| {
+            let line = || {
+                recognize(take_until_bytes(&b"\r\n"[..]).with(take(2).map(|_| ()))).and_then(
+                    |line: &[u8]| {
+                        str::from_utf8(&line[..line.len() - 2]).map_err(StreamErrorFor::<I>::other)
+                    },
                 )
-            })
+            };
+
+            let status = || {
+                line().map(|line| {
+                    if line == "OK" {
+                        Value::Okay
+                    } else {
+                        Value::Status(line.into())
+                    }
+                })
+            };
+
+            let int = || {
+                line().and_then(|line| match line.trim().parse::<i64>() {
+                    Err(_) => Err(StreamErrorFor::<I>::message_static_message(
+                        "Expected integer, got garbage",
+                    )),
+                    Ok(value) => Ok(value),
+                })
+            };
+
+            let data = || {
+                int().then_partial(move |size| {
+                    if *size < 0 {
+                        combine::value(Value::Nil).left()
+                    } else {
+                        take(*size as usize)
+                            .map(|bs: &[u8]| Value::Data(bs.to_vec()))
+                            .skip(crlf())
+                            .right()
+                    }
+                })
+            };
+
+            let bulk = || {
+                int().then_partial(move |&mut length| {
+                    if length < 0 {
+                        combine::value(Value::Nil).map(Ok).left()
+                    } else {
+                        let length = length as usize;
+                        combine::count_min_max(length, length, value(Some(count + 1)))
+                            .map(|result: ResultExtend<_, _>| result.0.map(Value::Bulk))
+                            .right()
+                    }
+                })
+            };
+
+            let error = || {
+                line().map(|line: &str| {
+                    let desc = "An error was signalled by the server";
+                    let mut pieces = line.splitn(2, ' ');
+                    let kind = match pieces.next().unwrap() {
+                        "ERR" => ErrorKind::ResponseError,
+                        "EXECABORT" => ErrorKind::ExecAbortError,
+                        "LOADING" => ErrorKind::BusyLoadingError,
+                        "NOSCRIPT" => ErrorKind::NoScriptError,
+                        "MOVED" => ErrorKind::Moved,
+                        "ASK" => ErrorKind::Ask,
+                        "TRYAGAIN" => ErrorKind::TryAgain,
+                        "CLUSTERDOWN" => ErrorKind::ClusterDown,
+                        "CROSSSLOT" => ErrorKind::CrossSlot,
+                        "MASTERDOWN" => ErrorKind::MasterDown,
+                        "READONLY" => ErrorKind::ReadOnly,
+                        code => return make_extension_error(code, pieces.next()),
+                    };
+                    match pieces.next() {
+                        Some(detail) => RedisError::from((kind, desc, detail.to_string())),
+                        None => RedisError::from((kind, desc)),
+                    }
+                })
+            };
+
+            combine::dispatch!(b;
+                b'+' => status().map(Ok),
+                b':' => int().map(|i| Ok(Value::Int(i))),
+                b'$' => data().map(Ok),
+                b'*' => bulk(),
+                b'-' => error().map(Err),
+                b => combine::unexpected_any(combine::error::Token(b))
+            )
+        })
     ))
 }
 
@@ -354,6 +378,7 @@ mod tests {
     #[test]
     fn test_max_recursion_depth() {
         let bytes = bytes::BytesMut::from(&b"*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n*1\r\n"[..]);
+        parse_redis_value(&bytes).unwrap();
         match parse_redis_value(&bytes) {
             Ok(_) => panic!("Expected Err"),
             Err(e) => assert!(matches!(e.kind(), ErrorKind::ResponseError)),
