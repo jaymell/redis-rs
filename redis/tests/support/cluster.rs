@@ -7,6 +7,8 @@ use std::process;
 use std::thread::sleep;
 use std::time::Duration;
 
+use redis::aio::ConnectionLike;
+use redis::cluster_async::Connect;
 use redis::ConnectionInfo;
 use tempfile::TempDir;
 
@@ -251,6 +253,17 @@ impl TestClusterContext {
 
     pub async fn async_connection(&self) -> redis::cluster_async::Connection {
         self.async_client.get_connection().await.unwrap()
+    }
+
+    pub async fn async_generic_connection<
+        C: ConnectionLike + Connect + Clone + Send + Sync + Unpin + 'static,
+    >(
+        &self,
+    ) -> redis::cluster_async::Connection<C> {
+        self.async_client
+            .get_generic_connection::<C>()
+            .await
+            .unwrap()
     }
 
     pub fn wait_for_cluster_up(&self) {
