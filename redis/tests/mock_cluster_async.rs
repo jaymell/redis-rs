@@ -6,11 +6,11 @@ use std::{
 use {
     futures::future,
     once_cell::sync::Lazy,
-        redis::{
-            aio::ConnectionLike, cmd, parse_redis_value, IntoConnectionInfo, RedisFuture,
-            RedisResult, Value,
-            cluster_async::{Client, Connect},
-        },
+    redis::{
+        aio::ConnectionLike,
+        cluster_async::{Client, Connect},
+        cmd, parse_redis_value, IntoConnectionInfo, RedisFuture, RedisResult, Value,
+    },
     tokio::runtime::Runtime,
 };
 

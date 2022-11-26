@@ -1,33 +1,183 @@
 #![cfg(feature = "cluster-async")]
 mod support;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    cell::Cell,
+    eprintln,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
+use futures::prelude::*;
+use futures::stream;
 use once_cell::sync::Lazy;
+use proptest::proptest;
 use redis::{
     aio::{ConnectionLike, MultiplexedConnection},
-    cluster_async::Connect,
+    cluster_async,
+    cluster_async::{Client, Connect},
     cmd, AsyncCommands, Cmd, IntoConnectionInfo, RedisError, RedisFuture, RedisResult, Script,
     Value,
 };
-use tokio::sync::{Mutex, MutexGuard};
+
+use tokio::{
+    runtime::Runtime,
+    sync::{Mutex, MutexGuard},
+};
 
 use crate::support::*;
 
 pub struct RedisProcess;
-pub struct RedisLock(MutexGuard<'static, RedisProcess>);
+// pub struct RedisLock(MutexGuard<'static, RedisProcess>);
 
-// impl RedisProcess {
-//     // Blocks until we have sole access.
-//     pub fn lock() -> RedisLock {
-//         static REDIS: Lazy<Mutex<RedisProcess>> = Lazy::new(|| Mutex::new(RedisProcess {}));
+impl RedisProcess {
+    // Blocks until we have sole access.
+    // pub fn lock() -> RedisLock {
+    //     static REDIS: Lazy<Mutex<RedisProcess>> = Lazy::new(|| Mutex::new(RedisProcess {}));
 
-//         // If we panic in a test we don't want subsequent to fail because of a poisoned error
-//         let redis_lock = REDIS
-//             .lock()
-//             .unwrap_or_else(|poison_error| poison_error.into_inner());
-//         RedisLock(redis_lock)
-//     }
-// }
+    //     // If we panic in a test we don't want subsequent to fail because of a poisoned error
+    //     let redis_lock = REDIS
+    //         .lock()
+    //         .unwrap_or_else(|poison_error| poison_error.into_inner());
+    //     RedisLock(redis_lock)
+    // }
+}
+
+// ----------------------------------------------------------------------------
+
+pub struct RuntimeEnv {
+    pub redis: RedisEnv,
+    pub runtime: Runtime,
+}
+
+impl RuntimeEnv {
+    pub fn new() -> Self {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .unwrap();
+        let redis = runtime.block_on(RedisEnv::new());
+
+        Self { runtime, redis }
+    }
+}
+pub struct RedisEnv {
+    // _redis_lock: RedisLock,
+    context: TestClusterContext,
+    pub client: Client,
+    nodes: Vec<redis::aio::MultiplexedConnection>,
+}
+
+impl RedisEnv {
+    pub async fn new() -> Self {
+        let _ = env_logger::try_init();
+
+        let cluster_context = TestClusterContext::new(3, 1);
+
+        // let redis_lock = RedisProcess::lock();
+        let redis_url = format!(
+            "redis://{}",
+            cluster_context
+                .cluster
+                .iter_servers()
+                .collect::<Vec<_>>()
+                .get(0)
+                .unwrap()
+                .get_client_addr()
+        );
+
+        let redis_client = redis::Client::open(redis_url.clone())
+            .unwrap_or_else(|e| panic!("Failed to connect to '{}': {}", redis_url, e));
+
+        let mut master_urls = Vec::new();
+        let mut nodes = Vec::new();
+
+        'outer: loop {
+            let node_infos = async {
+                let mut conn = redis_client.get_multiplexed_tokio_connection().await?;
+                Self::cluster_info(&mut conn).await
+            }
+            .await
+            .expect("Unable to query nodes for information");
+            // Wait for the cluster to stabilize
+            if node_infos.iter().filter(|(_, master)| *master).count() == 3 {
+                let cleared_nodes = async {
+                    master_urls.clear();
+                    nodes.clear();
+                    // Clear databases:
+                    for (url, master) in node_infos {
+                        let redis_client = redis::Client::open(&url[..])
+                            .unwrap_or_else(|_| panic!("Failed to connect to '{}'", url));
+                        let mut conn = redis_client.get_multiplexed_tokio_connection().await?;
+
+                        if master {
+                            master_urls.push(url.to_string());
+                            let () =
+                                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                                    Ok(redis::Cmd::new()
+                                        .arg("FLUSHALL")
+                                        .query_async(&mut conn)
+                                        .await?)
+                                })
+                                .await
+                                .unwrap_or_else(|err| Err(anyhow::Error::from(err)))?;
+                        }
+
+                        nodes.push(conn);
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
+                match cleared_nodes {
+                    Ok(()) => break 'outer,
+                    Err(err) => {
+                        // Failed to clear the databases, retry
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        }
+
+        let client = Client::open(master_urls.iter().map(|s| &s[..]).collect()).unwrap();
+
+        RedisEnv {
+            context: cluster_context,
+            client,
+            nodes,
+            // _redis_lock: redis_lock,
+        }
+    }
+
+    async fn cluster_info<T>(redis_client: &mut T) -> RedisResult<Vec<(String, bool)>>
+    where
+        T: Clone + redis::aio::ConnectionLike + Send + 'static,
+    {
+        redis::cmd("CLUSTER")
+            .arg("NODES")
+            .query_async(redis_client)
+            .await
+            .map(|s: String| {
+                s.lines()
+                    .map(|line| {
+                        let mut iter = line.split(' ');
+                        let port = iter
+                            .by_ref()
+                            .nth(1)
+                            .expect("Node ip")
+                            .splitn(2, '@')
+                            .next()
+                            .unwrap()
+                            .splitn(2, ':')
+                            .nth(1)
+                            .unwrap();
+                        (
+                            format!("redis://localhost:{}", port),
+                            iter.next().expect("master").contains("master"),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+    }
+}
 
 #[test]
 fn basic_cmd() {
@@ -114,100 +264,100 @@ fn basic_pipe() {
     .unwrap()
 }
 
-// #[test]
-// fn proptests() {
-//     let env = std::cell::RefCell::new(FailoverEnv::new());
+#[test]
+fn proptests() {
+    let env = std::cell::RefCell::new(FailoverEnv::new());
 
-//     proptest!(
-//         proptest::prelude::ProptestConfig { cases: 30, failure_persistence: None, .. Default::default() },
-//         |(requests in 0..15, value in 0..i32::max_value())| {
-//             test_failover(&mut env.borrow_mut(), requests, value)
-//         }
-//     );
-// }
+    proptest!(
+        proptest::prelude::ProptestConfig { cases: 30, failure_persistence: None, .. Default::default() },
+        |(requests in 0..15, value in 0..i32::max_value())| {
+            test_failover(&mut env.borrow_mut(), requests, value)
+        }
+    );
+}
 
-// #[test]
-// fn basic_failover() {
-//     test_failover(&mut FailoverEnv::new(), 10, 123);
-// }
+#[test]
+fn basic_failover() {
+    test_failover(&mut FailoverEnv::new(), 10, 123);
+}
 
-// struct FailoverEnv {
-//     env: RuntimeEnv,
-//     connection: redis_cluster_async::Connection,
-// }
+struct FailoverEnv {
+    env: RuntimeEnv,
+    connection: cluster_async::Connection,
+}
 
-// impl FailoverEnv {
-//     fn new() -> Self {
-//         let env = RuntimeEnv::new();
-//         let connection = env
-//             .runtime
-//             .block_on(env.redis.client.get_connection())
-//             .unwrap();
+impl FailoverEnv {
+    fn new() -> Self {
+        let env = RuntimeEnv::new();
+        let connection = env
+            .runtime
+            .block_on(env.redis.client.get_connection())
+            .unwrap();
 
-//         FailoverEnv { env, connection }
-//     }
-// }
+        FailoverEnv { env, connection }
+    }
+}
 
-// async fn do_failover(redis: &mut redis::aio::MultiplexedConnection) -> Result<(), anyhow::Error> {
-//     cmd("CLUSTER").arg("FAILOVER").query_async(redis).await?;
-//     Ok(())
-// }
+async fn do_failover(redis: &mut redis::aio::MultiplexedConnection) -> Result<(), anyhow::Error> {
+    cmd("CLUSTER").arg("FAILOVER").query_async(redis).await?;
+    Ok(())
+}
 
-// fn test_failover(env: &mut FailoverEnv, requests: i32, value: i32) {
-//     let completed = Cell::new(0);
-//     let completed = &completed;
+fn test_failover(env: &mut FailoverEnv, requests: i32, value: i32) {
+    let completed = Cell::new(0);
+    let completed = &completed;
 
-//     let FailoverEnv { env, connection } = env;
+    let FailoverEnv { env, connection } = env;
 
-//     let nodes = env.redis.nodes.clone();
+    let nodes = env.redis.nodes.clone();
 
-//     let test_future = async {
-//         (0..requests + 1)
-//             .map(|i| {
-//                 let mut connection = connection.clone();
-//                 let mut nodes = nodes.clone();
-//                 async move {
-//                     if i == requests / 2 {
-//                         // Failover all the nodes, error only if all the failover requests error
-//                         nodes
-//                             .iter_mut()
-//                             .map(|node| do_failover(node))
-//                             .collect::<stream::FuturesUnordered<_>>()
-//                             .fold(
-//                                 Err(anyhow::anyhow!("None")),
-//                                 |acc: Result<(), _>, result: Result<(), _>| async move {
-//                                     acc.or_else(|_| result)
-//                                 },
-//                             )
-//                             .await
-//                     } else {
-//                         let key = format!("test-{}-{}", value, i);
-//                         let () = cmd("SET")
-//                             .arg(&key)
-//                             .arg(i)
-//                             .clone()
-//                             .query_async(&mut connection)
-//                             .await?;
-//                         let res: i32 = cmd("GET")
-//                             .arg(key)
-//                             .clone()
-//                             .query_async(&mut connection)
-//                             .await?;
-//                         assert_eq!(res, i);
-//                         completed.set(completed.get() + 1);
-//                         Ok::<_, anyhow::Error>(())
-//                     }
-//                 }
-//             })
-//             .collect::<stream::FuturesUnordered<_>>()
-//             .try_collect()
-//             .await
-//     };
-//     env.runtime
-//         .block_on(test_future)
-//         .unwrap_or_else(|err| panic!("{}", err));
-//     assert_eq!(completed.get(), requests, "Some requests never completed!");
-// }
+    let test_future = async {
+        (0..requests + 1)
+            .map(|i| {
+                let mut connection = connection.clone();
+                let mut nodes = nodes.clone();
+                async move {
+                    if i == requests / 2 {
+                        // Failover all the nodes, error only if all the failover requests error
+                        nodes
+                            .iter_mut()
+                            .map(|node| do_failover(node))
+                            .collect::<stream::FuturesUnordered<_>>()
+                            .fold(
+                                Err(anyhow::anyhow!("None")),
+                                |acc: Result<(), _>, result: Result<(), _>| async move {
+                                    acc.or_else(|_| result)
+                                },
+                            )
+                            .await
+                    } else {
+                        let key = format!("test-{}-{}", value, i);
+                        let () = cmd("SET")
+                            .arg(&key)
+                            .arg(i)
+                            .clone()
+                            .query_async(&mut connection)
+                            .await?;
+                        let res: i32 = cmd("GET")
+                            .arg(key)
+                            .clone()
+                            .query_async(&mut connection)
+                            .await?;
+                        assert_eq!(res, i);
+                        completed.set(completed.get() + 1);
+                        Ok::<_, anyhow::Error>(())
+                    }
+                }
+            })
+            .collect::<stream::FuturesUnordered<_>>()
+            .try_collect()
+            .await
+    };
+    env.runtime
+        .block_on(test_future)
+        .unwrap_or_else(|err| panic!("{}", err));
+    assert_eq!(completed.get(), requests, "Some requests never completed!");
+}
 
 static ERROR: Lazy<AtomicBool> = Lazy::new(Default::default);
 
