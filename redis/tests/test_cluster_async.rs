@@ -25,10 +25,10 @@ use tokio::{
 
 use crate::support::*;
 
-pub struct RedisProcess;
+// pub struct RedisProcess;
 // pub struct RedisLock(MutexGuard<'static, RedisProcess>);
 
-impl RedisProcess {
+// impl RedisProcess {
     // Blocks until we have sole access.
     // pub fn lock() -> RedisLock {
     //     static REDIS: Lazy<Mutex<RedisProcess>> = Lazy::new(|| Mutex::new(RedisProcess {}));
@@ -39,7 +39,7 @@ impl RedisProcess {
     //         .unwrap_or_else(|poison_error| poison_error.into_inner());
     //     RedisLock(redis_lock)
     // }
-}
+// }
 
 // ----------------------------------------------------------------------------
 
