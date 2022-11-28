@@ -90,8 +90,7 @@ impl RedisCluster {
             is_tls = true;
         }
 
-        let total_nodes = nodes + (nodes * replicas);
-        for node in 0..total_nodes {
+        for node in 0..nodes {
             let port = start_port + node;
 
             servers.push(RedisServer::new_with_addr(

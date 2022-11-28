@@ -2,7 +2,6 @@
 mod support;
 use std::{
     cell::Cell,
-    eprintln,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -20,7 +19,6 @@ use redis::{
 
 use tokio::{
     runtime::Runtime,
-    sync::{Mutex, MutexGuard},
 };
 
 use crate::support::*;
@@ -62,16 +60,18 @@ impl RuntimeEnv {
 }
 pub struct RedisEnv {
     // _redis_lock: RedisLock,
-    context: TestClusterContext,
     pub client: Client,
     nodes: Vec<redis::aio::MultiplexedConnection>,
+    // needed to ensure cluster doesn't shut down before tests
+    // have completed:
+    _context: TestClusterContext,
 }
 
 impl RedisEnv {
     pub async fn new() -> Self {
         let _ = env_logger::try_init();
 
-        let cluster_context = TestClusterContext::new(3, 1);
+        let cluster_context = TestClusterContext::new(6, 1);
 
         // let redis_lock = RedisProcess::lock();
         let redis_url = format!(
@@ -131,6 +131,7 @@ impl RedisEnv {
                     Ok(()) => break 'outer,
                     Err(err) => {
                         // Failed to clear the databases, retry
+                        log::warn!("{}", err);
                     }
                 }
             }
@@ -140,9 +141,9 @@ impl RedisEnv {
         let client = Client::open(master_urls.iter().map(|s| &s[..]).collect()).unwrap();
 
         RedisEnv {
-            context: cluster_context,
             client,
             nodes,
+            _context: cluster_context,
             // _redis_lock: redis_lock,
         }
     }
