@@ -160,10 +160,7 @@ impl RedisCluster {
 
     fn wait_for_replicas(&self, replicas: u16) {
         'server: for server in &self.servers {
-            let conn_info = redis::ConnectionInfo {
-                addr: server.get_client_addr().clone(),
-                redis: Default::default(),
-            };
+            let conn_info = server.get_conn_info();
             eprintln!(
                 "waiting until {:?} knows required number of replicas",
                 conn_info.addr
@@ -229,10 +226,7 @@ impl TestClusterContext {
 
         let initial_nodes: Vec<ConnectionInfo> = cluster
             .iter_servers()
-            .map(|server| redis::ConnectionInfo {
-                addr: server.get_client_addr().clone(),
-                redis: Default::default(),
-            })
+            .map(RedisServer::get_conn_info)
             .collect();
         let mut builder = redis::cluster::ClusterClientBuilder::new(initial_nodes.clone());
         builder = initializer(builder);
