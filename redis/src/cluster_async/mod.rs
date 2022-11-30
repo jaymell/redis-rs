@@ -8,8 +8,9 @@
 //! Note that this library is currently not have features of Pubsub.
 //!
 //! # Example
-//! ```rust
-//! use redis_cluster_async::{Client, {Commands, cmd}};
+//! ```rust,ignore
+//! use redis::{Commands, cmd, RedisResult};
+//! use redis::cluster_async::Client;
 //!
 //! #[tokio::main]
 //! async fn main() -> RedisResult<()> {
@@ -26,8 +27,9 @@
 //! ```
 //!
 //! # Pipelining
-//! ```rust
-//! use redis_cluster_async::{Client, pipe};
+//! ```rust,ignore
+//! use redis::{pipe, RedisResult};
+//! use redis::cluster_async::Client;
 //!
 //! #[tokio::main]
 //! async fn main() -> RedisResult<()> {
@@ -978,7 +980,7 @@ impl Clone for Client {
 /// This trait implements the process of connecting to a redis server
 /// and obtaining a handle for command execution.
 pub trait Connect: Sized {
-    /// Connect to a node, returning handle for command execution. 
+    /// Connect to a node, returning handle for command execution.
     fn connect<'a, T>(info: T) -> RedisFuture<'a, Self>
     where
         T: IntoConnectionInfo + Send + 'a;
