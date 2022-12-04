@@ -974,7 +974,10 @@ impl Clone for Client {
     }
 }
 
+/// Implements the process of connecting to a redis server
+/// and obtaining a connection handle.
 pub trait Connect: Sized {
+    /// Connect to a node, returning handle for command execution. 
     fn connect<'a, T>(info: T) -> RedisFuture<'a, Self>
     where
         T: IntoConnectionInfo + Send + 'a;
