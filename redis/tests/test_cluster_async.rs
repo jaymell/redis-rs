@@ -23,7 +23,7 @@ use redis::{
 use crate::support::*;
 
 #[test]
-fn basic_cmd() {
+fn test_async_cluster_basic_cmd() {
     let cluster = TestClusterContext::new(3, 0);
 
     block_on_all(async move {
@@ -46,7 +46,7 @@ fn basic_cmd() {
 }
 
 #[test]
-fn basic_eval() {
+fn test_async_cluster_basic_eval() {
     let cluster = TestClusterContext::new(3, 0);
 
     block_on_all(async move {
@@ -67,7 +67,7 @@ fn basic_eval() {
 
 #[ignore] // TODO Handle running SCRIPT LOAD on all masters
 #[test]
-fn basic_script() {
+fn test_async_cluster_basic_script() {
     let cluster = TestClusterContext::new(3, 0);
 
     block_on_all(async move {
@@ -88,7 +88,7 @@ fn basic_script() {
 
 #[ignore] // TODO Handle pipe where the keys do not all go to the same node
 #[test]
-fn basic_pipe() {
+fn test_async_cluster_basic_pipe() {
     let cluster = TestClusterContext::new(3, 0);
 
     block_on_all(async move {
@@ -108,7 +108,7 @@ fn basic_pipe() {
 }
 
 #[test]
-fn proptests() {
+fn test_async_cluster_proptests() {
     let cluster = Arc::new(TestClusterContext::new(6, 1));
 
     proptest!(
@@ -121,7 +121,7 @@ fn proptests() {
 }
 
 #[test]
-fn basic_failover() {
+fn test_async_cluster_basic_failover() {
     block_on_all(async move {
         test_failover(&TestClusterContext::new(6, 1), 10, 123).await;
         Ok(())
@@ -273,7 +273,7 @@ impl ConnectionLike for ErrorConnection {
 }
 
 #[test]
-fn error_in_inner_connection() {
+fn test_async_cluster_error_in_inner_connection() {
     let cluster = TestClusterContext::new(3, 0);
 
     block_on_all(async move {
