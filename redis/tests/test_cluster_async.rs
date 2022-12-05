@@ -26,12 +26,15 @@ fn test_async_cluster_basic_cmd() {
     let cluster = TestClusterContext::new(3, 0);
 
     block_on_all(async move {
+        println!("HERE1");
         let mut connection = cluster.async_connection().await;
+        println!("HERE2");
         cmd("SET")
             .arg("test")
             .arg("test_data")
             .query_async(&mut connection)
             .await?;
+        println!("HERE3");
         let res: String = cmd("GET")
             .arg("test")
             .clone()

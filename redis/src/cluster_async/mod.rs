@@ -154,6 +154,7 @@ where
         initial_nodes: &[ConnectionInfo],
         retries: Option<u32>,
     ) -> RedisResult<Connection<C>> {
+        println!("INITIAL NODES {:?}", initial_nodes);
         Pipeline::new(initial_nodes, retries).await.map(|pipeline| {
             let (tx, mut rx) = mpsc::channel::<Message<_>>(100);
 
@@ -185,6 +186,7 @@ struct Pipeline<C> {
     pending_requests: Vec<PendingRequest<Response, C>>,
     retries: Option<u32>,
     tls: bool,
+    insecure: bool,
 }
 
 #[derive(Clone)]
@@ -456,7 +458,13 @@ where
         let tls = initial_nodes
             .iter()
             .all(|c| matches!(c.addr, ConnectionAddr::TcpTls { .. }));
+        let insecure = initial_nodes.iter().all(|c| match c.addr {
+            ConnectionAddr::TcpTls { insecure, .. } => insecure,
+            _ => false,
+        });
+        println!("TLS = {}", tls);
         let connections = Self::create_initial_connections(initial_nodes).await?;
+        println!("CONNECTIONS {:?}", connections);
         let mut connection = Pipeline {
             connections,
             slots: Default::default(),
@@ -466,8 +474,10 @@ where
             state: ConnectionState::PollComplete,
             retries,
             tls,
+            insecure,
         };
         let (slots, connections) = connection.refresh_slots().await.map_err(|(err, _)| err)?;
+        println!("SLOTS {:?} CONNS {:?}", slots, connections);
         connection.slots = slots;
         connection.connections = connections;
         Ok(connection)
@@ -502,7 +512,7 @@ where
                 match result {
                     Ok(conn) => Some((addr, async { conn }.boxed().shared())),
                     Err(e) => {
-                        trace!("Failed to connect to initial node: {:?}", e);
+                        println!("Failed to connect to initial node: {:?}", e);
                         None
                     }
                 }
@@ -522,6 +532,7 @@ where
                 "Failed to create initial connections",
             )));
         }
+        println!("CONNECTIONS 2 {:?}", connections);
         Ok(connections)
     }
 
@@ -532,12 +543,13 @@ where
     {
         let mut connections = mem::take(&mut self.connections);
         let use_tls = self.tls;
+        let tls_insecure = self.insecure;
 
         async move {
             let mut result = Ok(SlotMap::new());
             for (addr, conn) in connections.iter_mut() {
                 let mut conn = conn.clone().await;
-                match get_slots(addr, &mut conn, use_tls)
+                match get_slots(addr, &mut conn, use_tls, tls_insecure)
                     .await
                     .and_then(|v| Self::build_slot_map(v))
                 {
@@ -573,7 +585,9 @@ where
                             } else {
                                 match connect_and_check(addr.as_ref()).await {
                                     Ok(conn) => Some((addr.to_string(), conn)),
-                                    Err(_) => None,
+                                    Err(_) => {
+                                        println!("FUCKED HERE");
+                                        None },
                                 }
                             };
                             if let Some((addr, new_connection)) = new_connection {
@@ -585,6 +599,7 @@ where
                     },
                 )
                 .await;
+                println!("I MADE IT HERE");
             Ok((slots, connections))
         }
     }
@@ -622,13 +637,16 @@ where
 
     fn get_connection(&mut self, slot: u16) -> (String, ConnectionFuture<C>) {
         if let Some((_, addr)) = self.slots.range(&slot..).next() {
+            println!("HERE1000 {}", addr);
             if let Some(conn) = self.connections.get(addr) {
                 return (addr.clone(), conn.clone());
             }
 
             // Create new connection.
             //
+            println!("HERE1001");
             let (_, random_conn) = get_random_connection(&self.connections, None); // TODO Only do this lookup if the first check fails
+            println!("HERE1002");
             let connection_future = {
                 let addr = addr.clone();
                 async move {
@@ -1095,7 +1113,7 @@ impl Slot {
 }
 
 // Get slot data from connection.
-async fn get_slots<C>(addr: &str, connection: &mut C, use_tls: bool) -> RedisResult<Vec<Slot>>
+async fn get_slots<C>(addr: &str, connection: &mut C, use_tls: bool, tls_insecure: bool) -> RedisResult<Vec<Slot>>
 where
     C: ConnectionLike,
 {
@@ -1151,9 +1169,10 @@ where
                             return None;
                         };
                         let scheme = if use_tls { "rediss" } else { "redis" };
+                        let fragment = if use_tls && tls_insecure {"#insecure"} else {""};
                         match &password {
-                            Some(pw) => Some(format!("{}://:{}@{}:{}", scheme, pw, ip, port)),
-                            None => Some(format!("{}://{}:{}", scheme, ip, port)),
+                            Some(pw) => Some(format!("{}://:{}@{}:{}{}", scheme, pw, ip, port, fragment)),
+                            None => Some(format!("{}://{}:{}{}", scheme, ip, port, fragment)),
                         }
                     } else {
                         None
