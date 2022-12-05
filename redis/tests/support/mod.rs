@@ -207,6 +207,13 @@ impl RedisServer {
         &self.addr
     }
 
+    pub fn get_conn_info(&self) -> redis::ConnectionInfo {
+        redis::ConnectionInfo {
+            addr: self.get_client_addr().clone(),
+            redis: Default::default(),
+        }
+    }
+
     pub fn stop(&mut self) {
         let _ = self.process.kill();
         let _ = self.process.wait();
@@ -235,11 +242,7 @@ impl TestContext {
     pub fn with_modules(modules: &[Module]) -> TestContext {
         let server = RedisServer::with_modules(modules);
 
-        let client = redis::Client::open(redis::ConnectionInfo {
-            addr: server.get_client_addr().clone(),
-            redis: Default::default(),
-        })
-        .unwrap();
+        let client = redis::Client::open(server.get_conn_info()).unwrap();
         let mut con;
 
         let millisecond = Duration::from_millis(1);
