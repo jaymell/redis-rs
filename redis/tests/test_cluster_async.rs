@@ -28,7 +28,7 @@ fn test_async_cluster_basic_cmd() {
 
     block_on_all(async move {
         let mut connection = cluster.async_connection().await;
-        let () = cmd("SET")
+        cmd("SET")
             .arg("test")
             .arg("test_data")
             .query_async(&mut connection)
@@ -39,9 +39,8 @@ fn test_async_cluster_basic_cmd() {
             .query_async(&mut connection)
             .await?;
         assert_eq!(res, "test_data");
-        Ok(())
+        Ok::<_, RedisError>(())
     })
-    .map_err(|err: RedisError| err)
     .unwrap();
 }
 
@@ -59,9 +58,8 @@ fn test_async_cluster_basic_eval() {
             .query_async(&mut connection)
             .await?;
         assert_eq!(res, "test");
-        Ok(())
+        Ok::<_, RedisError>(())
     })
-    .map_err(|err: RedisError| err)
     .unwrap();
 }
 
@@ -80,9 +78,8 @@ fn test_async_cluster_basic_script() {
         .invoke_async(&mut connection)
         .await?;
         assert_eq!(res, "test");
-        Ok(())
+        Ok::<_, RedisError>(())
     })
-    .map_err(|err: RedisError| err)
     .unwrap();
 }
 
@@ -96,14 +93,13 @@ fn test_async_cluster_basic_pipe() {
         let mut pipe = redis::pipe();
         pipe.add_command(cmd("SET").arg("test").arg("test_data").clone());
         pipe.add_command(cmd("SET").arg("test3").arg("test_data3").clone());
-        let () = pipe.query_async(&mut connection).await?;
+        pipe.query_async(&mut connection).await?;
         let res: String = connection.get("test").await?;
         assert_eq!(res, "test_data");
         let res: String = connection.get("test3").await?;
         assert_eq!(res, "test_data3");
-        Ok(())
+        Ok::<_, RedisError>(())
     })
-    .map_err(|err: RedisError| err)
     .unwrap()
 }
 
@@ -124,9 +120,8 @@ fn test_async_cluster_proptests() {
 fn test_async_cluster_basic_failover() {
     block_on_all(async move {
         test_failover(&TestClusterContext::new(6, 1), 10, 123).await;
-        Ok(())
+        Ok::<_, RedisError>(())
     })
-    .map_err(|err: RedisError| err)
     .unwrap()
 }
 
@@ -162,7 +157,7 @@ async fn test_failover(env: &TestClusterContext, requests: i32, value: i32) {
                 let role: String = info.get("role").expect("cluster role");
 
                 if role == "master" {
-                    let () = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    tokio::time::timeout(std::time::Duration::from_secs(3), async {
                         Ok(redis::Cmd::new()
                             .arg("FLUSHALL")
                             .query_async(&mut conn)
@@ -195,18 +190,18 @@ async fn test_failover(env: &TestClusterContext, requests: i32, value: i32) {
                     // Failover all the nodes, error only if all the failover requests error
                     node_conns
                         .iter_mut()
-                        .map(|node| do_failover(node))
+                        .map(do_failover)
                         .collect::<stream::FuturesUnordered<_>>()
                         .fold(
                             Err(anyhow::anyhow!("None")),
                             |acc: Result<(), _>, result: Result<(), _>| async move {
-                                acc.or_else(|_| result)
+                                acc.or(result)
                             },
                         )
                         .await
                 } else {
                     let key = format!("test-{}-{}", value, i);
-                    let () = cmd("SET")
+                    cmd("SET")
                         .arg(&key)
                         .arg(i)
                         .clone()
@@ -291,8 +286,7 @@ fn test_async_cluster_error_in_inner_connection() {
             Err(RedisError::from((redis::ErrorKind::Moved, "ERROR")))
         );
 
-        Ok(())
+        Ok::<_, RedisError>(())
     })
-    .map_err(|err: RedisError| err)
     .unwrap();
 }
