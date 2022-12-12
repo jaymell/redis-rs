@@ -15,7 +15,7 @@ test:
 	@echo "===================================================================="
 	@echo "Testing Connection Type TCP with all features and TLS support"
 	@echo "===================================================================="
-	@REDISRS_SERVER_TYPE=tcp+tls cargo test --all-features -- --nocapture --test-threads=1
+	@REDISRS_SERVER_TYPE=tcp+tls cargo test --all-features -- --nocapture --test-threads=1 --skip test_async_cluster
 
 	@echo "===================================================================="
 	@echo "Testing Connection Type UNIX"
