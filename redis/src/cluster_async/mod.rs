@@ -410,7 +410,7 @@ where
                     } else if error_code == "TRYAGAIN" || error_code == "CLUSTERDOWN" {
                         // Sleep and retry.
                         let sleep_duration =
-                            Duration::from_millis(2u64.pow(request.retry.max(7).min(16)) * 10);
+                            Duration::from_millis(2u64.pow(request.retry.clamp(7, 16)) * 10);
                         request.info.excludes.clear();
                         this.future.set(RequestState::Sleep {
                             sleep: tokio::time::sleep(sleep_duration),
