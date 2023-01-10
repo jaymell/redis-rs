@@ -174,8 +174,10 @@ fn get_hashtag(key: &[u8]) -> Option<&[u8]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_hashtag, RoutingInfo};
-    use crate::{cmd, parser::parse_redis_value};
+    use crc16::{State, XMODEM};
+
+    use super::{get_hashtag, RoutingInfo, SLOT_SIZE};
+    use crate::{cmd, parser::parse_redis_value, Value};
 
     #[test]
     fn test_get_hashtag() {
@@ -257,5 +259,57 @@ mod tests {
                 RoutingInfo::for_routable(&cmd).unwrap(),
             );
         }
+    }
+
+    fn slot_for_packed_command(cmd: &[u8]) -> Option<u16> {
+        command_key(cmd).map(|key| {
+            let key = get_hashtag(&key).unwrap_or(&key);
+            State::<XMODEM>::calculate(key) % SLOT_SIZE
+        })
+    }
+
+    fn command_key(cmd: &[u8]) -> Option<Vec<u8>> {
+        parse_redis_value(cmd).ok().and_then(|value| match value {
+            Value::Bulk(mut args) => {
+                if args.len() >= 2 {
+                    match args.swap_remove(1) {
+                        Value::Data(key) => Some(key),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn test_slot_for_packed_command() {
+        assert_eq!(
+            slot_for_packed_command(&[
+                42, 50, 13, 10, 36, 54, 13, 10, 69, 88, 73, 83, 84, 83, 13, 10, 36, 49, 54, 13, 10,
+                244, 93, 23, 40, 126, 127, 253, 33, 89, 47, 185, 204, 171, 249, 96, 139, 13, 10
+            ]),
+            Some(964)
+        );
+        assert_eq!(
+            slot_for_packed_command(&[
+                42, 54, 13, 10, 36, 51, 13, 10, 83, 69, 84, 13, 10, 36, 49, 54, 13, 10, 36, 241,
+                197, 111, 180, 254, 5, 175, 143, 146, 171, 39, 172, 23, 164, 145, 13, 10, 36, 52,
+                13, 10, 116, 114, 117, 101, 13, 10, 36, 50, 13, 10, 78, 88, 13, 10, 36, 50, 13, 10,
+                80, 88, 13, 10, 36, 55, 13, 10, 49, 56, 48, 48, 48, 48, 48, 13, 10
+            ]),
+            Some(8352)
+        );
+        assert_eq!(
+            slot_for_packed_command(&[
+                42, 54, 13, 10, 36, 51, 13, 10, 83, 69, 84, 13, 10, 36, 49, 54, 13, 10, 169, 233,
+                247, 59, 50, 247, 100, 232, 123, 140, 2, 101, 125, 221, 66, 170, 13, 10, 36, 52,
+                13, 10, 116, 114, 117, 101, 13, 10, 36, 50, 13, 10, 78, 88, 13, 10, 36, 50, 13, 10,
+                80, 88, 13, 10, 36, 55, 13, 10, 49, 56, 48, 48, 48, 48, 48, 13, 10
+            ]),
+            Some(5210),
+        );
     }
 }

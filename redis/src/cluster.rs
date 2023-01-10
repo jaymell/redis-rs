@@ -671,7 +671,7 @@ impl NodeCmd {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum TlsMode {
     Secure,
     Insecure,
@@ -812,5 +812,41 @@ fn build_connection_string(host: &str, port: Option<u16>, tls_mode: Option<TlsMo
             format!("rediss://{}/#insecure", host_port)
         }
         Some(TlsMode::Secure) => format!("rediss://{}", host_port),
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ConnectionInfo;
+
+    #[test]
+    fn test_tls_mode() {
+        let cons: &[ConnectionInfo] = &[
+            "rediss://127.0.0.1:7000/#insecure".parse().unwrap(),
+            "rediss://127.0.0.1:7001/#insecure".parse().unwrap(),
+            "rediss://127.0.0.1:7002/#insecure".parse().unwrap(),
+        ];
+        assert_eq!(tls_mode(cons).unwrap(), TlsMode::Insecure);
+
+        let cons: &[ConnectionInfo] = &[
+            "rediss://127.0.0.1:7000/#insecure".parse().unwrap(),
+            "rediss://127.0.0.1:7001/".parse().unwrap(),
+            "rediss://127.0.0.1:7002/#insecure".parse().unwrap(),
+        ];
+        assert_eq!(tls_mode(cons).unwrap(), TlsMode::Secure);
+
+        let cons: &[ConnectionInfo] = &[
+            "rediss://127.0.0.1:7000/#insecure".parse().unwrap(),
+            "rediss://127.0.0.1:7001/".parse().unwrap(),
+            "redis://127.0.0.1:7002/".parse().unwrap(),
+        ];
+        assert_eq!(tls_mode(cons).unwrap(), TlsMode::Secure);
+
+        let cons: &[ConnectionInfo] = &[
+            "redis://127.0.0.1:7000/".parse().unwrap(),
+            "redis://127.0.0.1:7001/".parse().unwrap(),
+            "redis://127.0.0.1:7002/".parse().unwrap(),
+        ];
+        assert!(tls_mode(cons).is_none());
     }
 }
