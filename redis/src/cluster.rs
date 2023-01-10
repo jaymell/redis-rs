@@ -90,25 +90,7 @@ impl ClusterConnection {
             password: cluster_params.password,
             read_timeout: RefCell::new(None),
             write_timeout: RefCell::new(None),
-            #[cfg(feature = "tls")]
-            tls: {
-                if initial_nodes.is_empty() {
-                    None
-                } else {
-                    // TODO: Maybe should run through whole list and make sure they're all matching?
-                    match &initial_nodes.get(0).unwrap().addr {
-                        ConnectionAddr::Tcp(_, _) => None,
-                        ConnectionAddr::TcpTls {
-                            host: _,
-                            port: _,
-                            insecure,
-                        } => Some(TlsMode::from_insecure_flag(*insecure)),
-                        _ => None,
-                    }
-                }
-            },
-            #[cfg(not(feature = "tls"))]
-            tls: None,
+            tls: tls_mode(&initial_nodes),
             initial_nodes: initial_nodes.to_vec(),
         };
         connection.create_initial_connections()?;
@@ -790,6 +772,33 @@ pub(crate) fn parse_slots(
     }
 
     Ok(result)
+}
+
+pub(crate) fn tls_mode(nodes: &[ConnectionInfo]) -> Option<TlsMode> {
+    #[cfg(not(feature = "tls"))]
+    return None;
+
+    #[cfg(feature = "tls")]
+    {
+        // This is a bit ugly but goal here is to err on side of more security; if we're only storing one
+        // setting for entire cluster, then if any node is TLS/secure, they all should be considered so
+        // rather than just using settings of whatever is first in the list:
+        let (tls, secure) = nodes
+            .iter()
+            .fold((false, false), |(tls_acc, secure_acc), c| match c.addr {
+                ConnectionAddr::TcpTls { insecure, .. } if insecure => (true, secure_acc),
+                ConnectionAddr::TcpTls { insecure, .. } if !insecure => (true, true),
+                _ => (tls_acc, secure_acc),
+            });
+        if tls {
+            Some(match secure {
+                true => TlsMode::Secure,
+                _ => TlsMode::Insecure,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 fn build_connection_string(host: &str, port: Option<u16>, tls_mode: Option<TlsMode>) -> String {
