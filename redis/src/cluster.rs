@@ -276,7 +276,10 @@ impl ClusterConnection {
         let mut samples = connections.values_mut().choose_multiple(&mut rng, len);
 
         for conn in samples.iter_mut() {
-            if let Ok(mut slots_data) = get_slots(conn, self.tls) {
+            let mut cmd = Cmd::new();
+            cmd.arg("CLUSTER").arg("SLOTS");
+            let value = conn.req_command(&cmd)?;
+            if let Ok(mut slots_data) = parse_slots(value, self.tls) {
                 slots_data.sort_by_key(|s| s.start());
                 let last_slot = slots_data.iter().try_fold(0, |prev_end, slot_data| {
                     if prev_end != slot_data.start() {
@@ -687,7 +690,7 @@ impl NodeCmd {
 }
 
 #[derive(Clone, Copy)]
-enum TlsMode {
+pub(crate) enum TlsMode {
     Secure,
     Insecure,
 }
@@ -721,16 +724,14 @@ fn get_random_connection<'a>(
     (addr, con)
 }
 
-// Get slot data from connection.
-fn get_slots(connection: &mut Connection, tls_mode: Option<TlsMode>) -> RedisResult<Vec<Slot>> {
-    let mut cmd = Cmd::new();
-    cmd.arg("CLUSTER").arg("SLOTS");
-    let value = connection.req_command(&cmd)?;
-
-    // Parse response.
+// Parse output of `CLUSTER SLOTS` command
+pub(crate) fn parse_slots(
+    raw_slot_resp: Value,
+    tls_mode: Option<TlsMode>,
+) -> RedisResult<Vec<Slot>> {
     let mut result = Vec::with_capacity(2);
 
-    if let Value::Bulk(items) = value {
+    if let Value::Bulk(items) = raw_slot_resp {
         let mut iter = items.into_iter();
         while let Some(Value::Bulk(item)) = iter.next() {
             if item.len() < 3 {
