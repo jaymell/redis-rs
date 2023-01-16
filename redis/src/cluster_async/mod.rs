@@ -154,7 +154,7 @@ impl<C> Connection<C>
 where
     C: ConnectionLike + Connect + Clone + Send + Sync + Unpin + 'static,
 {
-    async fn new(
+    pub(crate) async fn new(
         initial_nodes: &[ConnectionInfo],
         retries: Option<u32>,
     ) -> RedisResult<Connection<C>> {

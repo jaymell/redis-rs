@@ -1,4 +1,5 @@
 use crate::cluster::ClusterConnection;
+use crate::cluster_async;
 use crate::connection::{ConnectionAddr, ConnectionInfo, IntoConnectionInfo};
 use crate::types::{ErrorKind, RedisError, RedisResult};
 
@@ -165,6 +166,20 @@ impl ClusterClient {
     /// An error is returned if there is a failure while creating connections or slots.
     pub fn get_connection(&self) -> RedisResult<ClusterConnection> {
         ClusterConnection::new(self.cluster_params.clone(), self.initial_nodes.clone())
+    }
+
+    /// TODO
+    #[cfg(feature = "cluster-async")]
+    pub async fn get_async_connection(&self) -> RedisResult<cluster_async::Connection> {
+        cluster_async::Connection::new(&self.initial_nodes, None).await
+    }
+    
+    #[doc(hidden)]
+    pub async fn get_generic_connection<C>(&self) -> RedisResult<cluster_async::Connection<C>>
+    where
+        C: crate::aio::ConnectionLike + cluster_async::Connect + Clone + Send + Sync + Unpin + 'static,
+    {
+        cluster_async::Connection::new(&self.initial_nodes, None).await
     }
 
     /// Use `new()`.
