@@ -233,10 +233,7 @@ impl TestClusterContext {
         builder = initializer(builder);
         let client = builder.build().unwrap();
 
-        TestClusterContext {
-            cluster,
-            client,
-        }
+        TestClusterContext { cluster, client }
     }
 
     pub fn connection(&self) -> redis::cluster::ClusterConnection {
@@ -254,10 +251,7 @@ impl TestClusterContext {
     >(
         &self,
     ) -> redis::cluster_async::Connection<C> {
-        self.client
-            .get_generic_connection::<C>()
-            .await
-            .unwrap()
+        self.client.get_generic_connection::<C>().await.unwrap()
     }
 
     pub fn wait_for_cluster_up(&self) {

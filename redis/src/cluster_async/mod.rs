@@ -88,63 +88,6 @@ use rand::thread_rng;
 use tokio::sync::{mpsc, oneshot};
 
 const SLOT_SIZE: usize = 16384;
-const DEFAULT_RETRIES: u32 = 16;
-
-/// This is a Redis cluster client.
-pub struct Client {
-    initial_nodes: Vec<ConnectionInfo>,
-    retries: Option<u32>,
-}
-
-impl Client {
-    /// Connect to a redis cluster server and return a cluster client.
-    /// This does not actually open a connection yet but it performs some basic checks on the URL.
-    ///
-    /// # Errors
-    ///
-    /// If it is failed to parse initial_nodes, an error is returned.
-    pub fn open<T: IntoConnectionInfo>(initial_nodes: Vec<T>) -> RedisResult<Client> {
-        let mut nodes = Vec::with_capacity(initial_nodes.len());
-
-        for info in initial_nodes {
-            let info = info.into_connection_info()?;
-            if let ConnectionAddr::Unix(_) = info.addr {
-                return Err(RedisError::from((ErrorKind::InvalidClientConfig,
-                                             "This library cannot use unix socket because Redis's cluster command returns only cluster's IP and port.")));
-            }
-            nodes.push(info);
-        }
-
-        Ok(Client {
-            initial_nodes: nodes,
-            retries: Some(DEFAULT_RETRIES),
-        })
-    }
-
-    /// Set how many times we should retry a query. Set `None` to retry forever.
-    /// Default: 16
-    pub fn set_retries(&mut self, retries: Option<u32>) -> &mut Self {
-        self.retries = retries;
-        self
-    }
-
-    /// Open and get a Redis cluster connection.
-    ///
-    /// # Errors
-    ///
-    /// If it is failed to open connections and to create slots, an error is returned.
-    pub async fn get_connection(&self) -> RedisResult<Connection> {
-        Connection::new(&self.initial_nodes, self.retries).await
-    }
-
-    #[doc(hidden)]
-    pub async fn get_generic_connection<C>(&self) -> RedisResult<Connection<C>>
-    where
-        C: ConnectionLike + Connect + Clone + Send + Sync + Unpin + 'static,
-    {
-        Connection::new(&self.initial_nodes, self.retries).await
-    }
-}
 
 /// This is a connection of Redis cluster.
 #[derive(Clone)]
@@ -959,12 +902,6 @@ where
 
     fn get_db(&self) -> i64 {
         0
-    }
-}
-
-impl Clone for Client {
-    fn clone(&self) -> Client {
-        Client::open(self.initial_nodes.clone()).unwrap()
     }
 }
 
