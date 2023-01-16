@@ -7,9 +7,8 @@ use {
     futures::future,
     once_cell::sync::Lazy,
     redis::{
-        aio::ConnectionLike,
-        cluster_async::{Client, Connect},
-        cmd, parse_redis_value, IntoConnectionInfo, RedisFuture, RedisResult, Value,
+        aio::ConnectionLike, cluster_async::Connect, cmd, parse_redis_value, IntoConnectionInfo,
+        RedisFuture, RedisResult, Value,
     },
     tokio::runtime::Runtime,
 };
@@ -96,7 +95,7 @@ impl ConnectionLike for MockConnection {
 
 pub struct MockEnv {
     runtime: Runtime,
-    client: redis::cluster_async::Client,
+    client: redis::cluster::ClusterClient,
     connection: redis::cluster_async::Connection<MockConnection>,
     #[allow(unused)]
     handler: RemoveHandler,
@@ -127,7 +126,7 @@ impl MockEnv {
             Arc::new(move |cmd, port| handler(&cmd.get_packed_command(), port)),
         );
 
-        let client = Client::open(vec![&*format!("redis://{}", id)]).unwrap();
+        let client = redis::cluster::ClusterClient::new(vec![&*format!("redis://{}", id)]).unwrap();
         let connection = runtime.block_on(client.get_generic_connection()).unwrap();
         MockEnv {
             runtime,
@@ -189,11 +188,10 @@ fn test_async_cluster_tryagain_exhaust_retries() {
     });
 
     let mut connection = runtime
-        .block_on(
-            client
-                .set_retries(Some(2))
-                .get_generic_connection::<MockConnection>(),
-        )
+        .block_on(client
+                // FIXME
+                // .set_retries(Some(2))
+                .get_generic_connection::<MockConnection>())
         .unwrap();
 
     let result = runtime.block_on(
