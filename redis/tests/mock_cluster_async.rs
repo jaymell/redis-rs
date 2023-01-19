@@ -112,6 +112,7 @@ impl Drop for RemoveHandler {
 impl MockEnv {
     fn new(
         id: &str,
+        retries: Option<u32>,
         handler: impl Fn(&[u8], u16) -> Result<(), RedisResult<Value>> + Send + Sync + 'static,
     ) -> Self {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -126,7 +127,12 @@ impl MockEnv {
             Arc::new(move |cmd, port| handler(&cmd.get_packed_command(), port)),
         );
 
-        let client = redis::cluster::ClusterClient::new(vec![&*format!("redis://{}", id)]).unwrap();
+        let builder = redis::cluster::ClusterClientBuilder::new(vec![&*format!("redis://{}", id)]);
+        let client = if let Some(retries) = retries {
+            builder.retries(retries).build().unwrap()
+        } else {
+            builder.build().unwrap()
+        };
         let connection = runtime.block_on(client.get_generic_connection()).unwrap();
         MockEnv {
             runtime,
@@ -148,7 +154,7 @@ fn test_async_cluster_tryagain_simple() {
         mut connection,
         handler: _handler,
         ..
-    } = MockEnv::new(name, move |cmd: &[u8], _| {
+    } = MockEnv::new(name, None, move |cmd: &[u8], _| {
         respond_startup(name, cmd)?;
 
         match requests.fetch_add(1, atomic::Ordering::SeqCst) {
@@ -175,10 +181,10 @@ fn test_async_cluster_tryagain_exhaust_retries() {
 
     let MockEnv {
         runtime,
-        mut client,
+        client,
         handler: _handler,
         ..
-    } = MockEnv::new(name, {
+    } = MockEnv::new(name, Some(2), {
         let requests = requests.clone();
         move |cmd: &[u8], _| {
             respond_startup(name, cmd)?;
@@ -189,8 +195,6 @@ fn test_async_cluster_tryagain_exhaust_retries() {
 
     let mut connection = runtime
         .block_on(client
-                // FIXME
-                // .set_retries(Some(2))
                 .get_generic_connection::<MockConnection>())
         .unwrap();
 
@@ -219,7 +223,7 @@ fn test_async_cluster_rebuild_with_extra_nodes() {
         mut connection,
         handler: _handler,
         ..
-    } = MockEnv::new(name, move |cmd: &[u8], port| {
+    } = MockEnv::new(name, None, move |cmd: &[u8], port| {
         if !started.load(atomic::Ordering::SeqCst) {
             respond_startup(name, cmd)?;
         }

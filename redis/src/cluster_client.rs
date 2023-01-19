@@ -9,6 +9,7 @@ pub(crate) struct ClusterParams {
     pub(crate) password: Option<String>,
     pub(crate) username: Option<String>,
     pub(crate) read_from_replicas: bool,
+    pub(crate) retries: Option<u32>,
 }
 
 /// Used to configure and build a [`ClusterClient`].
@@ -109,6 +110,12 @@ impl ClusterClientBuilder {
         self
     }
 
+    /// Sets number of retries for the new ClusterClient.
+    pub fn retries(mut self, retries: u32) -> ClusterClientBuilder {
+        self.cluster_params.retries = Some(retries);
+        self
+    }
+
     /// Enables reading from replicas for all new connections (default is disabled).
     ///
     /// If enabled, then read queries will go to the replica nodes & write queries will go to the
@@ -171,7 +178,7 @@ impl ClusterClient {
     /// TODO
     #[cfg(feature = "cluster-async")]
     pub async fn get_async_connection(&self) -> RedisResult<cluster_async::Connection> {
-        cluster_async::Connection::new(&self.initial_nodes, None).await
+        cluster_async::Connection::new(&self.initial_nodes, self.cluster_params.retries).await
     }
 
     #[doc(hidden)]
@@ -185,7 +192,7 @@ impl ClusterClient {
             + Unpin
             + 'static,
     {
-        cluster_async::Connection::new(&self.initial_nodes, None).await
+        cluster_async::Connection::new(&self.initial_nodes, self.cluster_params.retries).await
     }
 
     /// Use `new()`.
