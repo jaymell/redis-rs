@@ -62,6 +62,8 @@ use crate::types::{ErrorKind, HashMap, HashSet, RedisError, RedisResult, Value};
 pub use crate::cluster_client::{ClusterClient, ClusterClientBuilder};
 pub use crate::cluster_pipeline::{cluster_pipe, ClusterPipeline};
 
+const DEFAULT_RETRIES: u32 = 16;
+
 /// This is a connection of Redis cluster.
 pub struct ClusterConnection {
     initial_nodes: Vec<ConnectionInfo>,
@@ -74,6 +76,7 @@ pub struct ClusterConnection {
     read_timeout: RefCell<Option<Duration>>,
     write_timeout: RefCell<Option<Duration>>,
     tls: Option<TlsMode>,
+    retries: u32,
 }
 
 impl ClusterConnection {
@@ -92,6 +95,7 @@ impl ClusterConnection {
             write_timeout: RefCell::new(None),
             tls: tls_mode(&initial_nodes),
             initial_nodes: initial_nodes.to_vec(),
+            retries: cluster_params.retries.unwrap_or(DEFAULT_RETRIES),
         };
         connection.create_initial_connections()?;
 
@@ -428,7 +432,7 @@ impl ClusterConnection {
             None => fail!(UNROUTABLE_ERROR),
         };
 
-        let mut retries = 16;
+        let mut retries = self.retries;
         let mut excludes = HashSet::new();
         let mut redirected = None::<String>;
         let mut is_asking = false;

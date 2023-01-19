@@ -194,8 +194,7 @@ fn test_async_cluster_tryagain_exhaust_retries() {
     });
 
     let mut connection = runtime
-        .block_on(client
-                .get_generic_connection::<MockConnection>())
+        .block_on(client.get_generic_connection::<MockConnection>())
         .unwrap();
 
     let result = runtime.block_on(
