@@ -12,7 +12,7 @@ use std::{
 
 use crate::{
     aio::{ConnectionLike, MultiplexedConnection},
-    cluster::{parse_slots, tls_mode, TlsMode},
+    cluster::{parse_slots, tls_mode, TlsMode, DEFAULT_RETRIES},
     cluster_routing::{RoutingInfo, Slot},
     Cmd, ConnectionAddr, ConnectionInfo, ErrorKind, IntoConnectionInfo, RedisError, RedisFuture,
     RedisResult, Value,
@@ -45,21 +45,23 @@ where
         initial_nodes: &[ConnectionInfo],
         retries: Option<u32>,
     ) -> RedisResult<Connection<C>> {
-        Pipeline::new(initial_nodes, retries).await.map(|pipeline| {
-            let (tx, mut rx) = mpsc::channel::<Message<_>>(100);
-            let stream = async move {
-                let _ = stream::poll_fn(move |cx| rx.poll_recv(cx))
-                    .map(Ok)
-                    .forward(pipeline)
-                    .await;
-            };
-            #[cfg(feature = "tokio-comp")]
-            tokio::spawn(stream);
-            #[cfg(all(not(feature = "tokio-comp"), feature = "async-std-comp"))]
-            AsyncStd::spawn(stream);
+        Pipeline::new(initial_nodes, retries.or(Some(DEFAULT_RETRIES)))
+            .await
+            .map(|pipeline| {
+                let (tx, mut rx) = mpsc::channel::<Message<_>>(100);
+                let stream = async move {
+                    let _ = stream::poll_fn(move |cx| rx.poll_recv(cx))
+                        .map(Ok)
+                        .forward(pipeline)
+                        .await;
+                };
+                #[cfg(feature = "tokio-comp")]
+                tokio::spawn(stream);
+                #[cfg(all(not(feature = "tokio-comp"), feature = "async-std-comp"))]
+                AsyncStd::spawn(stream);
 
-            Connection(tx)
-        })
+                Connection(tx)
+            })
     }
 }
 

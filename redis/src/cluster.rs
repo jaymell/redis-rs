@@ -62,7 +62,7 @@ use crate::types::{ErrorKind, HashMap, HashSet, RedisError, RedisResult, Value};
 pub use crate::cluster_client::{ClusterClient, ClusterClientBuilder};
 pub use crate::cluster_pipeline::{cluster_pipe, ClusterPipeline};
 
-const DEFAULT_RETRIES: u32 = 16;
+pub(crate) const DEFAULT_RETRIES: u32 = 16;
 
 /// This is a connection of Redis cluster.
 pub struct ClusterConnection {
