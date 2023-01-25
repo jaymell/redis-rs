@@ -45,7 +45,7 @@ where
         initial_nodes: &[ConnectionInfo],
         retries: Option<u32>,
     ) -> RedisResult<Connection<C>> {
-        Pipeline::new(initial_nodes, retries.or(Some(DEFAULT_RETRIES)))
+        Pipeline::new(initial_nodes, retries.unwrap_or(DEFAULT_RETRIES))
             .await
             .map(|pipeline| {
                 let (tx, mut rx) = mpsc::channel::<Message<_>>(100);
@@ -79,7 +79,7 @@ struct Pipeline<C> {
     >,
     refresh_error: Option<RedisError>,
     pending_requests: Vec<PendingRequest<Response, C>>,
-    retries: Option<u32>,
+    retries: u32,
     tls: Option<TlsMode>,
 }
 
@@ -198,7 +198,7 @@ struct PendingRequest<I, C> {
 
 pin_project! {
     struct Request<F, I, C> {
-        max_retries: Option<u32>,
+        max_retries: u32,
         request: Option<PendingRequest<I, C>>,
         #[pin]
         future: RequestState<F>,
@@ -253,12 +253,9 @@ where
 
                 let request = this.request.as_mut().unwrap();
 
-                match *this.max_retries {
-                    Some(max_retries) if request.retry >= max_retries => {
-                        self.respond(Err(err));
-                        return Next::Done.into();
-                    }
-                    _ => (),
+                if request.retry >= *this.max_retries {
+                    self.respond(Err(err));
+                    return Next::Done.into();
                 }
                 request.retry = request.retry.saturating_add(1);
 
@@ -320,7 +317,7 @@ impl<C> Pipeline<C>
 where
     C: ConnectionLike + Connect + Clone + Send + Sync + 'static,
 {
-    async fn new(initial_nodes: &[ConnectionInfo], retries: Option<u32>) -> RedisResult<Self> {
+    async fn new(initial_nodes: &[ConnectionInfo], retries: u32) -> RedisResult<Self> {
         let connections = Self::create_initial_connections(initial_nodes).await?;
         let mut connection = Pipeline {
             connections,
