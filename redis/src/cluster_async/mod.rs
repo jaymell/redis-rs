@@ -68,9 +68,11 @@ use std::{
 
 use crate::{
     aio::{ConnectionLike, MultiplexedConnection},
-    cluster_routing::RoutingInfo,
-    parse_redis_url, Cmd, ConnectionAddr, ConnectionInfo, ErrorKind, IntoConnectionInfo,
-    RedisError, RedisFuture, RedisResult, Value,
+    cluster::{get_connection_info, parse_slots},
+    cluster_client::ClusterParams,
+    cluster_routing::{RoutingInfo, Slot},
+    Cmd, ConnectionAddr, ConnectionInfo, ErrorKind, IntoConnectionInfo, RedisError, RedisFuture,
+    RedisResult, Value,
 };
 
 #[cfg(all(not(feature = "tokio-comp"), feature = "async-std-comp"))]
@@ -190,7 +192,7 @@ struct Pipeline<C> {
     refresh_error: Option<RedisError>,
     pending_requests: Vec<PendingRequest<Response, C>>,
     retries: Option<u32>,
-    tls: bool,
+    cluster_params: ClusterParams,
 }
 
 #[derive(Clone)]
@@ -431,10 +433,15 @@ where
     C: ConnectionLike + Connect + Clone + Send + Sync + 'static,
 {
     async fn new(initial_nodes: &[ConnectionInfo], retries: Option<u32>) -> RedisResult<Self> {
-        let tls = initial_nodes
-            .iter()
-            .all(|c| matches!(c.addr, ConnectionAddr::TcpTls { .. }));
-        let connections = Self::create_initial_connections(initial_nodes).await?;
+        let cluster_params = ClusterParams {
+            // FIXME:
+            password: None,
+            username: None,
+            tls: None,
+            ..Default::default()
+        };
+
+        let connections = Self::create_initial_connections(initial_nodes, &cluster_params).await?;
         let mut connection = Pipeline {
             connections,
             slots: Default::default(),
@@ -443,7 +450,7 @@ where
             pending_requests: Vec::new(),
             state: ConnectionState::PollComplete,
             retries,
-            tls,
+            cluster_params,
         };
         let (slots, connections) = connection.refresh_slots().await.map_err(|(err, _)| err)?;
         connection.slots = slots;
@@ -453,30 +460,13 @@ where
 
     async fn create_initial_connections(
         initial_nodes: &[ConnectionInfo],
+        params: &ClusterParams,
     ) -> RedisResult<ConnectionMap<C>> {
         let connections = stream::iter(initial_nodes.iter().cloned())
             .map(|info| async move {
-                let addr = match info.addr {
-                    ConnectionAddr::Tcp(ref host, port) => match &info.redis.password {
-                        Some(pw) => format!("redis://:{pw}@{host}:{port}"),
-                        None => format!("redis://{host}:{port}"),
-                    },
-                    ConnectionAddr::TcpTls {
-                        ref host,
-                        port,
-                        insecure,
-                    } => match &info.redis.password {
-                        Some(pw) if insecure => {
-                            format!("rediss://:{pw}@{host}:{port}/#insecure")
-                        }
-                        Some(pw) => format!("rediss://:{pw}@{host}:{port}"),
-                        None if insecure => format!("rediss://{host}:{port}/#insecure"),
-                        None => format!("rediss://{host}:{port}"),
-                    },
-                    _ => panic!("No reach."),
-                };
+                let addr = info.addr.to_string();
 
-                let result = connect_and_check(info).await;
+                let result = connect_and_check(&addr, params.clone()).await;
                 match result {
                     Ok(conn) => Some((addr, async { conn }.boxed().shared())),
                     Err(e) => {
@@ -509,21 +499,31 @@ where
     ) -> impl Future<Output = Result<(SlotMap, ConnectionMap<C>), (RedisError, ConnectionMap<C>)>>
     {
         let mut connections = mem::take(&mut self.connections);
-        let use_tls = self.tls;
+        let cluster_params = self.cluster_params.clone();
 
         async move {
             let mut result = Ok(SlotMap::new());
-            for (addr, conn) in connections.iter_mut() {
+            for (_, conn) in connections.iter_mut() {
                 let mut conn = conn.clone().await;
-                match get_slots(addr, &mut conn, use_tls)
-                    .await
-                    .and_then(|v| Self::build_slot_map(v))
-                {
+                trace!("get_slots");
+                let mut cmd = Cmd::new();
+                cmd.arg("CLUSTER").arg("SLOTS");
+                let value = match conn.req_packed_command(&cmd).await {
+                    Ok(value) => value,
+                    Err(err) => {
+                        result = Err(err);
+                        continue;
+                    }
+                };
+                trace!("get_slots -> {:#?}", value);
+                match parse_slots(value, cluster_params.tls).and_then(|v| Self::build_slot_map(v)) {
                     Ok(s) => {
                         result = Ok(s);
                         break;
                     }
-                    Err(err) => result = Err(err),
+                    Err(err) => {
+                        result = Err(err);
+                    }
                 }
             }
             let slots = match result {
@@ -532,43 +532,39 @@ where
             };
 
             // Remove dead connections and connect to new nodes if necessary
-            let new_connections = HashMap::with_capacity(connections.len());
+            let mut new_connections = HashMap::with_capacity(slots.len());
 
-            let (_, connections) = stream::iter(slots.values())
-                .fold(
-                    (connections, new_connections),
-                    move |(mut connections, mut new_connections), addr| async move {
-                        if !new_connections.contains_key(addr) {
-                            let new_connection = if let Some(conn) = connections.remove(addr) {
-                                let mut conn = conn.await;
-                                match check_connection(&mut conn).await {
-                                    Ok(_) => Some((addr.to_string(), conn)),
-                                    Err(_) => match connect_and_check(addr.as_ref()).await {
-                                        Ok(conn) => Some((addr.to_string(), conn)),
-                                        Err(_) => None,
-                                    },
-                                }
-                            } else {
-                                match connect_and_check(addr.as_ref()).await {
+            for addr in slots.values() {
+                if !new_connections.contains_key(addr) {
+                    let new_connection = if let Some(conn) = connections.remove(addr) {
+                        let mut conn = conn.await;
+                        match check_connection(&mut conn).await {
+                            Ok(_) => Some((addr.to_string(), conn)),
+                            Err(_) => {
+                                match connect_and_check(&addr, cluster_params.clone()).await {
                                     Ok(conn) => Some((addr.to_string(), conn)),
                                     Err(_) => None,
                                 }
-                            };
-                            if let Some((addr, new_connection)) = new_connection {
-                                new_connections
-                                    .insert(addr, async { new_connection }.boxed().shared());
                             }
                         }
-                        (connections, new_connections)
-                    },
-                )
-                .await;
-            Ok((slots, connections))
+                    } else {
+                        match connect_and_check(&addr, cluster_params.clone()).await {
+                            Ok(conn) => Some((addr.to_string(), conn)),
+                            Err(_) => None,
+                        }
+                    };
+                    if let Some((addr, new_connection)) = new_connection {
+                        new_connections.insert(addr, async { new_connection }.boxed().shared());
+                    }
+                }
+            }
+
+            Ok((slots, new_connections))
         }
     }
 
     fn build_slot_map(mut slots_data: Vec<Slot>) -> RedisResult<SlotMap> {
-        slots_data.sort_by_key(|slot_data| slot_data.start);
+        slots_data.sort_by_key(|slot_data| slot_data.start());
         let last_slot = slots_data.iter().try_fold(0, |prev_end, slot_data| {
             if prev_end != slot_data.start() {
                 return Err(RedisError::from((
@@ -576,7 +572,9 @@ where
                     "Slot refresh error.",
                     format!(
                         "Received overlapping slots {} and {}..{}",
-                        prev_end, slot_data.start, slot_data.end
+                        prev_end,
+                        slot_data.start(),
+                        slot_data.end()
                     ),
                 )));
             }
@@ -609,8 +607,9 @@ where
             let (_, random_conn) = get_random_connection(&self.connections, None); // TODO Only do this lookup if the first check fails
             let connection_future = {
                 let addr = addr.clone();
+                let cluster_params = self.cluster_params.clone();
                 async move {
-                    match connect_and_check(addr.as_ref()).await {
+                    match connect_and_check(&addr, cluster_params.clone()).await {
                         Ok(conn) => conn,
                         Err(_) => random_conn.await,
                     }
@@ -985,11 +984,11 @@ impl Connect for MultiplexedConnection {
     }
 }
 
-async fn connect_and_check<T, C>(info: T) -> RedisResult<C>
+async fn connect_and_check<C>(node: &str, params: ClusterParams) -> RedisResult<C>
 where
-    T: IntoConnectionInfo + Send,
     C: ConnectionLike + Connect + Send + 'static,
 {
+    let info = get_connection_info(node, params)?;
     let mut conn = C::connect(info).await?;
     check_connection(&mut conn).await?;
     Ok(conn)
@@ -1047,118 +1046,6 @@ fn sub_key(key: &[u8]) -> &[u8] {
                 })
         })
         .unwrap_or(key)
-}
-
-#[derive(Debug)]
-struct Slot {
-    start: u16,
-    end: u16,
-    master: String,
-    replicas: Vec<String>,
-}
-
-impl Slot {
-    pub fn start(&self) -> u16 {
-        self.start
-    }
-    pub fn end(&self) -> u16 {
-        self.end
-    }
-    pub fn master(&self) -> &str {
-        &self.master
-    }
-    #[allow(dead_code)]
-    pub fn replicas(&self) -> &Vec<String> {
-        &self.replicas
-    }
-}
-
-// Get slot data from connection.
-async fn get_slots<C>(addr: &str, connection: &mut C, use_tls: bool) -> RedisResult<Vec<Slot>>
-where
-    C: ConnectionLike,
-{
-    trace!("get_slots");
-    let mut cmd = Cmd::new();
-    cmd.arg("CLUSTER").arg("SLOTS");
-    let value = connection.req_packed_command(&cmd).await.map_err(|err| {
-        trace!("get_slots error: {}", err);
-        err
-    })?;
-    trace!("get_slots -> {:#?}", value);
-    // Parse response.
-    let mut result = Vec::with_capacity(2);
-
-    if let Value::Bulk(items) = value {
-        let password = get_password(addr);
-        let mut iter = items.into_iter();
-        while let Some(Value::Bulk(item)) = iter.next() {
-            if item.len() < 3 {
-                continue;
-            }
-
-            let start = if let Value::Int(start) = item[0] {
-                start as u16
-            } else {
-                continue;
-            };
-
-            let end = if let Value::Int(end) = item[1] {
-                end as u16
-            } else {
-                continue;
-            };
-
-            let mut nodes: Vec<String> = item
-                .into_iter()
-                .skip(2)
-                .filter_map(|node| {
-                    if let Value::Bulk(node) = node {
-                        if node.len() < 2 {
-                            return None;
-                        }
-
-                        let ip = if let Value::Data(ref ip) = node[0] {
-                            String::from_utf8_lossy(ip)
-                        } else {
-                            return None;
-                        };
-
-                        let port = if let Value::Int(port) = node[1] {
-                            port
-                        } else {
-                            return None;
-                        };
-                        let scheme = if use_tls { "rediss" } else { "redis" };
-                        match &password {
-                            Some(pw) => Some(format!("{scheme}://:{pw}@{ip}:{port}")),
-                            None => Some(format!("{scheme}://{ip}:{port}")),
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            if nodes.is_empty() {
-                continue;
-            }
-
-            let replicas = nodes.split_off(1);
-            result.push(Slot {
-                start,
-                end,
-                master: nodes.pop().unwrap(),
-                replicas,
-            });
-        }
-    }
-
-    Ok(result)
-}
-
-fn get_password(addr: &str) -> Option<String> {
-    parse_redis_url(addr).and_then(|url| url.password().map(|s| s.into()))
 }
 
 #[cfg(test)]

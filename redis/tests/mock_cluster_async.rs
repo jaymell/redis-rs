@@ -31,6 +31,7 @@ impl Connect for MockConnection {
     {
         let info = info.into_connection_info().unwrap();
 
+        println!("GOT THIS {:?}", info);
         let (name, port) = match &info.addr {
             redis::ConnectionAddr::Tcp(addr, port) => (addr, *port),
             _ => unreachable!(),
