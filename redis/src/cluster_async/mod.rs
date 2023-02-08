@@ -68,7 +68,7 @@ use std::{
 
 use crate::{
     aio::{ConnectionLike, MultiplexedConnection},
-    cluster::{get_connection_info, parse_slots},
+    cluster::{get_connection_info, parse_slots, TlsMode},
     cluster_client::ClusterParams,
     cluster_routing::{RoutingInfo, Slot},
     Cmd, ConnectionAddr, ConnectionInfo, ErrorKind, IntoConnectionInfo, RedisError, RedisFuture,
@@ -433,11 +433,33 @@ where
     C: ConnectionLike + Connect + Clone + Send + Sync + 'static,
 {
     async fn new(initial_nodes: &[ConnectionInfo], retries: Option<u32>) -> RedisResult<Self> {
+        // This is mostly copied from ClusterClientBuilder
+        // and is just a placeholder until ClusterClient
+        // handles async connections
+        let first_node = match initial_nodes.first() {
+            Some(node) => node,
+            None => {
+                return Err(RedisError::from((
+                    ErrorKind::InvalidClientConfig,
+                    "Initial nodes can't be empty.",
+                )))
+            }
+        };
+
         let cluster_params = ClusterParams {
-            // FIXME:
-            password: None,
-            username: None,
-            tls: None,
+            password: first_node.redis.password.clone(),
+            username: first_node.redis.username.clone(),
+            tls: match first_node.addr {
+                ConnectionAddr::TcpTls {
+                    host: _,
+                    port: _,
+                    insecure,
+                } => Some(match insecure {
+                    false => TlsMode::Secure,
+                    true => TlsMode::Insecure,
+                }),
+                _ => None,
+            },
             ..Default::default()
         };
 
