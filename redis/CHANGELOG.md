@@ -1,3 +1,22 @@
+<a name="0.22.4"></a>
+### 0.22.4 (2023-02-18)
+
+This release fixes a longstanding bug in async streaming and adds some additional 
+improvements to the clustered module, along with some other minor changes. Thanks 
+to our contributors!
+
+#### Bugfixes
+* Fix AsyncIter Stream trait implementation ([#597](https://github.com/redis-rs/redis-rs/pull/597) @roger)
+
+#### Features
+* Cluster refactorings ([#718](https://github.com/redis-rs/redis-rs/pull/718) @0xWOF, @utkarshgupta137)
+
+#### Changes
+* Upgrade criterion ([#786](https://github.com/redis-rs/redis-rs/pull/786))
+* Fix/reorganize tests for `RedisJson` module ([#786](https://github.com/redis-rs/redis-rs/pull/786))
+* Allow disabling `default` user in tests ([#718](https://github.com/redis-rs/redis-rs/pull/718))
+
+
 <a name="0.22.3"></a>
 ### 0.22.3 (2023-01-23)
 
@@ -64,7 +83,7 @@ contributors -- thank you!
 *   Make Direction a public enum to use with Commands like BLMOVE ([#646](https://github.com/redis-rs/redis-rs/pull/646) @thorbadour)
 *   Add `ahash` feature for using ahash internally & for redis values ([#636](https://github.com/redis-rs/redis-rs/pull/636) @utkarshgupta137)
 *   Add Script::load function ([#603](https://github.com/redis-rs/redis-rs/pull/603) @zhiburt)
-*   Add support for OBJECT ([[#610]](https://github.com/redis-rs/redis-rs/pull/610) @roger)
+*   Add support for OBJECT ([#610](https://github.com/redis-rs/redis-rs/pull/610) @roger)
 *   Add GETEX and GETDEL support ([#582](https://github.com/redis-rs/redis-rs/pull/582) @arpandaze)
 *   Add support for ZMPOP ([#605](https://github.com/redis-rs/redis-rs/pull/605) @gkorland)
 
