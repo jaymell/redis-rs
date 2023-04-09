@@ -1,11 +1,14 @@
 #![cfg(feature = "cluster")]
 mod support;
-use std::sync::{atomic, Arc};
+use std::sync::{
+    atomic::{self, AtomicI32, Ordering},
+    Arc,
+};
 
 use crate::support::*;
 use redis::{
     cluster::{cluster_pipe, ClusterClient},
-    cmd, parse_redis_value, Value,
+    cmd, parse_redis_value, RedisError, Value,
 };
 
 #[test]
@@ -309,7 +312,7 @@ fn test_cluster_exhaust_retries() {
             move |cmd: &[u8], _| {
                 respond_startup(name, cmd)?;
                 requests.fetch_add(1, atomic::Ordering::SeqCst);
-                Err(parse_redis_value(b"-TRYAGAIN mock\r\n"))
+                Err(parse_redis_value(b"-BUSYLOADING mock\r\n"))
             }
         },
     );
@@ -318,7 +321,7 @@ fn test_cluster_exhaust_retries() {
 
     assert_eq!(
         result.map_err(|err| err.to_string()),
-        Err("An error was signalled by the server: mock".to_string())
+        Err("BUSYLOADING: mock".to_string())
     );
     assert_eq!(requests.load(atomic::Ordering::SeqCst), 3);
 }
@@ -432,4 +435,65 @@ fn test_cluster_replica_read() {
         .arg("123")
         .query::<Option<Value>>(&mut connection);
     assert_eq!(value, Ok(Some(Value::Status("OK".to_owned()))));
+}
+
+#[test]
+#[ignore]
+fn test_cluster_replica_read_failure_should_fall_back_to_master() {
+    let name = "node";
+
+    let MockEnv {
+        mut connection,
+        handler: _handler,
+        ..
+    } = MockEnv::with_client_builder(
+        ClusterClient::builder(vec![&*format!("redis://{name}")])
+            .retries(1)
+            .read_from_replicas(),
+        name,
+        move |cmd: &[u8], port| {
+            respond_startup_with_replica(name, cmd)?;
+            match port {
+                6379 => Err(Ok(Value::Data(b"123".to_vec()))),
+                _ => Err(parse_redis_value(b"-ERR mock\r\n")),
+            }
+        },
+    );
+
+    let value = cmd("GET").arg("test").query::<Option<i32>>(&mut connection);
+
+    assert_eq!(value, Ok(Some(123)));
+}
+
+#[test]
+fn test_cluster_io_error() {
+    let name = "node";
+    let completed = Arc::new(AtomicI32::new(0));
+    let MockEnv {
+        mut connection,
+        handler: _handler,
+        ..
+    } = MockEnv::with_client_builder(
+        ClusterClient::builder(vec![&*format!("redis://{name}")]).retries(2),
+        name,
+        move |cmd: &[u8], port| {
+            respond_startup_two_nodes(name, cmd)?;
+            // Error twice with io-error, ensure connection is reestablished w/out calling
+            // other node (i.e., not doing a full slot rebuild)
+            match port {
+                6380 => panic!("Node should not be called"),
+                _ => match completed.fetch_add(1, Ordering::SeqCst) {
+                    0..=1 => Err(Err(RedisError::from(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "mock-io-error",
+                    )))),
+                    _ => Err(Ok(Value::Data(b"123".to_vec()))),
+                },
+            }
+        },
+    );
+
+    let value = cmd("GET").arg("test").query::<Option<i32>>(&mut connection);
+
+    assert_eq!(value, Ok(Some(123)));
 }
