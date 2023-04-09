@@ -100,7 +100,7 @@ struct ClusterConnInner<C> {
     state: ConnectionState<C>,
     #[allow(clippy::complexity)]
     in_flight_requests: stream::FuturesUnordered<
-        Pin<Box<Request<BoxFuture<'static, (String, RedisResult<Response>)>, Response, C>>>,
+        Pin<Box<Request<BoxFuture<'static, (Option<String>, RedisResult<Response>)>, Response, C>>>,
     >,
     refresh_error: Option<RedisError>,
     pending_requests: Vec<PendingRequest<Response, C>>,
@@ -243,7 +243,7 @@ enum Next<I, C> {
 
 impl<F, I, C> Future for Request<F, I, C>
 where
-    F: Future<Output = (String, RedisResult<I>)>,
+    F: Future<Output = (Option<String>, RedisResult<I>)>,
     C: ConnectionLike,
 {
     type Output = Next<I, C>;
@@ -307,7 +307,9 @@ where
                     }
                 }
 
-                request.info.excludes.insert(addr);
+                if let Some(addr) = addr {
+                    request.info.excludes.insert(addr);
+                }
 
                 Next::TryNewConnection {
                     request: this.request.take().unwrap(),
@@ -321,7 +323,7 @@ where
 
 impl<F, I, C> Request<F, I, C>
 where
-    F: Future<Output = (String, RedisResult<I>)>,
+    F: Future<Output = (Option<String>, RedisResult<I>)>,
     C: ConnectionLike,
 {
     fn respond(self: Pin<&mut Self>, msg: RedisResult<I>) {
@@ -499,16 +501,16 @@ where
         Ok(slot_map)
     }
 
-    fn get_connection(&mut self, route: &Route) -> (String, ConnectionFuture<C>) {
+    fn get_connection(&mut self, route: &Route) -> Option<(String, ConnectionFuture<C>)> {
         if let Some((_, node_addrs)) = self.slots.range(&route.slot()..).next() {
             let addr = node_addrs.slot_addr(route.slot_addr()).to_string();
             if let Some(conn) = self.connections.get(&addr) {
-                return (addr, conn.clone());
+                return Some((addr, conn.clone()));
             }
 
             // Create new connection.
             //
-            let (_, random_conn) = get_random_connection(&self.connections, None); // TODO Only do this lookup if the first check fails
+            let (_, random_conn) = get_random_connection(&self.connections, None)?; // TODO Only do this lookup if the first check fails
             let connection_future = {
                 let addr = addr.clone();
                 let params = self.cluster_params.clone();
@@ -523,7 +525,7 @@ where
             .shared();
             self.connections
                 .insert(addr.clone(), connection_future.clone());
-            (addr, connection_future)
+            Some((addr, connection_future))
         } else {
             // Return a random connection
             get_random_connection(&self.connections, None)
@@ -533,15 +535,40 @@ where
     fn try_request(
         &mut self,
         info: &RequestInfo<C>,
-    ) -> impl Future<Output = (String, RedisResult<Response>)> {
+    ) -> impl Future<Output = (Option<String>, RedisResult<Response>)> {
         // TODO remove clone by changing the ConnectionLike trait
         let cmd = info.cmd.clone();
-        let (addr, conn) = if !info.excludes.is_empty() || info.route.is_none() {
+        let addr_conn_option = if !info.excludes.is_empty() || info.route.is_none() {
             get_random_connection(&self.connections, Some(&info.excludes))
+
+            // match get_random_connection(&self.connections, Some(&info.excludes)) {
+            //     Some((addr, conn)) => (Some(addr), conn),
+            //     None => {
+            //         return (None, Err(RedisError::from((ErrorKind::ClusterDown, "Unable to obtain connection"))));
+            //     }
+            // }
         } else {
             self.get_connection(info.route.as_ref().unwrap())
+            // match self.get_connection(info.route.as_ref().unwrap()) {
+            //     Some((addr, conn)) => (Some(addr), conn),
+            //     None => {
+            //         return (None, Err(RedisError::from((ErrorKind::ClusterDown, "Unable to obtain connection"))));
+            //     }
+            // }
         };
         async move {
+            let (addr, conn) = match addr_conn_option {
+                Some((addr, conn)) => (Some(addr), conn),
+                None => {
+                    return (
+                        None,
+                        Err(RedisError::from((
+                            ErrorKind::ClusterDown,
+                            "Unable to obtain connection",
+                        ))),
+                    );
+                }
+            };
             let conn = conn.await;
             let result = cmd.exec(conn).await;
             (addr, result)
@@ -909,7 +936,7 @@ where
 fn get_random_connection<'a, C>(
     connections: &'a ConnectionMap<C>,
     excludes: Option<&'a HashSet<String>>,
-) -> (String, ConnectionFuture<C>)
+) -> Option<(String, ConnectionFuture<C>)>
 where
     C: Clone,
 {
@@ -924,6 +951,7 @@ where
         _ => connections.keys().choose(&mut rng),
     };
 
-    let addr = sample.expect("No targets to choose from");
-    (addr.to_string(), connections.get(addr).unwrap().clone())
+    let addr = sample?.to_string();
+    let conn = connections.get(&addr)?.clone();
+    Some((addr, conn))
 }

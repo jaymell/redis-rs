@@ -385,7 +385,10 @@ where
         } else {
             // try a random node next.  This is safe if slots are involved
             // as a wrong node would reject the request.
-            Ok(get_random_connection(connections, None))
+            get_random_connection(connections, None).ok_or(RedisError::from((
+                ErrorKind::ClusterDown,
+                "Unable to obtain connection",
+            )))
         }
     }
 
@@ -500,7 +503,9 @@ where
                     }
                     (addr.to_string(), conn)
                 } else if !excludes.is_empty() || route.is_none() {
-                    get_random_connection(&mut connections, Some(&excludes))
+                    get_random_connection(&mut connections, Some(&excludes)).ok_or(
+                        RedisError::from((ErrorKind::ClusterDown, "Unable to obtain connection")),
+                    )?
                 } else {
                     self.get_connection(&mut connections, route.as_ref().unwrap())?
                 };
@@ -731,20 +736,19 @@ pub enum TlsMode {
 fn get_random_connection<'a, C: ConnectionLike + Connect + Sized>(
     connections: &'a mut HashMap<String, C>,
     excludes: Option<&'a HashSet<String>>,
-) -> (String, &'a mut C) {
+) -> Option<(String, &'a mut C)> {
     let mut rng = thread_rng();
     let addr = match excludes {
         Some(excludes) if excludes.len() < connections.len() => connections
             .keys()
             .filter(|key| !excludes.contains(*key))
-            .choose(&mut rng)
-            .unwrap()
+            .choose(&mut rng)?
             .to_string(),
         _ => connections.keys().choose(&mut rng).unwrap().to_string(),
     };
 
-    let con = connections.get_mut(&addr).unwrap();
-    (addr, con)
+    let con = connections.get_mut(&addr)?;
+    Some((addr, con))
 }
 
 // Parse slot data from raw redis value.
