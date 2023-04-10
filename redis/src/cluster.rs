@@ -50,7 +50,7 @@ use crate::connection::{
     connect, Connection, ConnectionAddr, ConnectionInfo, ConnectionLike, RedisConnectionInfo,
 };
 use crate::parser::parse_redis_value;
-use crate::types::{ErrorKind, HashMap, HashSet, RedisError, RedisResult, Value};
+use crate::types::{ErrorKind, HashMap, RedisError, RedisResult, Value};
 use crate::IntoConnectionInfo;
 use crate::{
     cluster_client::ClusterParams,
@@ -385,7 +385,7 @@ where
         } else {
             // try a random node next.  This is safe if slots are involved
             // as a wrong node would reject the request.
-            get_random_connection(connections, None).ok_or(RedisError::from((
+            get_random_connection(connections).ok_or(RedisError::from((
                 ErrorKind::ClusterDown,
                 "Unable to obtain connection",
             )))
@@ -485,12 +485,11 @@ where
         };
 
         let mut retries = self.retries;
-        let mut excludes = HashSet::new();
         let mut redirected = None::<String>;
         let mut is_asking = false;
         loop {
             // Get target address and response.
-            let (addr, rv) = {
+            let (_addr, rv) = {
                 let mut connections = self.connections.borrow_mut();
                 let (addr, conn) = if let Some(addr) = redirected.take() {
                     let conn = self.get_connection_by_addr(&mut connections, &addr)?;
@@ -502,8 +501,8 @@ where
                         is_asking = false;
                     }
                     (addr.to_string(), conn)
-                } else if !excludes.is_empty() || route.is_none() {
-                    get_random_connection(&mut connections, Some(&excludes)).ok_or(
+                } else if route.is_none() {
+                    get_random_connection(&mut connections).ok_or(
                         RedisError::from((ErrorKind::ClusterDown, "Unable to obtain connection")),
                     )?
                 } else {
@@ -529,8 +528,6 @@ where
                         } else if kind == ErrorKind::Moved {
                             // Refresh slots.
                             self.refresh_slots()?;
-                            excludes.clear();
-
                             // Request again.
                             redirected = err.redirect_node().map(|(node, _slot)| node.to_string());
                             is_asking = false;
@@ -539,21 +536,17 @@ where
                             // Sleep and retry.
                             let sleep_time = 2u64.pow(16 - retries.max(9)) * 10;
                             thread::sleep(Duration::from_millis(sleep_time));
-                            excludes.clear();
                             continue;
                         }
                     } else if *self.auto_reconnect.borrow() && err.is_io_error() {
                         self.create_initial_connections()?;
-                        excludes.clear();
                         continue;
                     } else {
                         return Err(err);
                     }
 
-                    excludes.insert(addr);
-
                     let connections = self.connections.borrow();
-                    if excludes.len() >= connections.len() {
+                    if connections.is_empty() {
                         return Err(err);
                     }
                 }
@@ -735,18 +728,8 @@ pub enum TlsMode {
 
 fn get_random_connection<'a, C: ConnectionLike + Connect + Sized>(
     connections: &'a mut HashMap<String, C>,
-    excludes: Option<&'a HashSet<String>>,
 ) -> Option<(String, &'a mut C)> {
-    let mut rng = thread_rng();
-    let addr = match excludes {
-        Some(excludes) if excludes.len() < connections.len() => connections
-            .keys()
-            .filter(|key| !excludes.contains(*key))
-            .choose(&mut rng)?
-            .to_string(),
-        _ => connections.keys().choose(&mut rng).unwrap().to_string(),
-    };
-
+    let addr = connections.keys().choose(&mut thread_rng())?.to_string();
     let con = connections.get_mut(&addr)?;
     Some((addr, con))
 }

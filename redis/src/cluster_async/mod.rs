@@ -22,7 +22,7 @@
 //! }
 //! ```
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt, io,
     iter::Iterator,
     marker::Unpin,
@@ -195,7 +195,6 @@ impl<C> fmt::Debug for ConnectionState<C> {
 struct RequestInfo<C> {
     cmd: CmdArg<C>,
     route: Option<Route>,
-    excludes: HashSet<String>,
 }
 
 pin_project! {
@@ -271,8 +270,8 @@ where
                 self.respond(Ok(item));
                 Next::Done.into()
             }
-            (addr, Err(err)) => {
-                trace!("Request error {}", err);
+            (_addr, Err(err)) => {
+                println!("Request error {}", err);
 
                 let request = this.request.as_mut().unwrap();
 
@@ -284,8 +283,7 @@ where
 
                 if let Some(error_code) = err.code() {
                     if error_code == "MOVED" || error_code == "ASK" {
-                        // Refresh slots and request again.
-                        request.info.excludes.clear();
+                        println!("ERROR CODE IS MOVED");
                         return Next::Err {
                             request: this.request.take().unwrap(),
                             error: err,
@@ -295,7 +293,6 @@ where
                         // Sleep and retry.
                         let sleep_duration =
                             Duration::from_millis(2u64.pow(request.retry.clamp(7, 16)) * 10);
-                        request.info.excludes.clear();
                         this.future.set(RequestState::Sleep {
                             #[cfg(feature = "tokio-comp")]
                             sleep: Box::pin(tokio::time::sleep(sleep_duration)),
@@ -305,10 +302,6 @@ where
                         });
                         return self.poll(cx);
                     }
-                }
-
-                if let Some(addr) = addr {
-                    request.info.excludes.insert(addr);
                 }
 
                 Next::TryNewConnection {
@@ -510,7 +503,7 @@ where
 
             // Create new connection.
             //
-            let (_, random_conn) = get_random_connection(&self.connections, None)?; // TODO Only do this lookup if the first check fails
+            let (_, random_conn) = get_random_connection(&self.connections)?; // TODO Only do this lookup if the first check fails
             let connection_future = {
                 let addr = addr.clone();
                 let params = self.cluster_params.clone();
@@ -528,7 +521,7 @@ where
             Some((addr, connection_future))
         } else {
             // Return a random connection
-            get_random_connection(&self.connections, None)
+            get_random_connection(&self.connections)
         }
     }
 
@@ -538,23 +531,10 @@ where
     ) -> impl Future<Output = (Option<String>, RedisResult<Response>)> {
         // TODO remove clone by changing the ConnectionLike trait
         let cmd = info.cmd.clone();
-        let addr_conn_option = if !info.excludes.is_empty() || info.route.is_none() {
-            get_random_connection(&self.connections, Some(&info.excludes))
-
-            // match get_random_connection(&self.connections, Some(&info.excludes)) {
-            //     Some((addr, conn)) => (Some(addr), conn),
-            //     None => {
-            //         return (None, Err(RedisError::from((ErrorKind::ClusterDown, "Unable to obtain connection"))));
-            //     }
-            // }
+        let addr_conn_option = if info.route.is_none() {
+            get_random_connection(&self.connections)
         } else {
             self.get_connection(info.route.as_ref().unwrap())
-            // match self.get_connection(info.route.as_ref().unwrap()) {
-            //     Some((addr, conn)) => (Some(addr), conn),
-            //     None => {
-            //         return (None, Err(RedisError::from((ErrorKind::ClusterDown, "Unable to obtain connection"))));
-            //     }
-            // }
         };
         async move {
             let (addr, conn) = match addr_conn_option {
@@ -636,7 +616,7 @@ where
                 Next::Done => {}
                 Next::TryNewConnection { request, error } => {
                     if let Some(error) = error {
-                        if request.info.excludes.len() >= self_.connections.len() {
+                        if self_.connections.len() == 0 {
                             let _ = request.sender.send(Err(error));
                             continue;
                         }
@@ -720,14 +700,9 @@ where
         trace!("start_send");
         let Message { cmd, sender } = msg;
 
-        let excludes = HashSet::new();
         let slot = cmd.route();
 
-        let info = RequestInfo {
-            cmd,
-            route: slot,
-            excludes,
-        };
+        let info = RequestInfo { cmd, route: slot };
 
         self.pending_requests.push(PendingRequest {
             retry: 0,
@@ -935,23 +910,11 @@ where
 
 fn get_random_connection<'a, C>(
     connections: &'a ConnectionMap<C>,
-    excludes: Option<&'a HashSet<String>>,
 ) -> Option<(String, ConnectionFuture<C>)>
 where
     C: Clone,
 {
-    debug_assert!(!connections.is_empty());
-
-    let mut rng = thread_rng();
-    let sample = match excludes {
-        Some(excludes) if excludes.len() < connections.len() => {
-            let target_keys = connections.keys().filter(|key| !excludes.contains(*key));
-            target_keys.choose(&mut rng)
-        }
-        _ => connections.keys().choose(&mut rng),
-    };
-
-    let addr = sample?.to_string();
+    let addr = connections.keys().choose(&mut thread_rng())?.to_string();
     let conn = connections.get(&addr)?.clone();
     Some((addr, conn))
 }
