@@ -149,13 +149,13 @@ impl<C> CmdArg<C> {
             Self::Cmd { ref cmd, .. } => route_for_command(cmd),
             Self::Pipeline { ref pipeline, .. } => {
                 let mut iter = pipeline.cmd_iter();
-                let slot = iter.next().map(route_for_command)?;
+                let route = iter.next().map(route_for_command)?;
                 for cmd in iter {
-                    if slot != route_for_command(cmd) {
+                    if route != route_for_command(cmd) {
                         return None;
                     }
                 }
-                slot
+                route
             }
         }
     }
@@ -281,15 +281,15 @@ where
                 }
                 request.retry = request.retry.saturating_add(1);
 
-                if let Some(error_code) = err.code() {
-                    if error_code == "MOVED" || error_code == "ASK" {
-                        println!("ERROR CODE IS MOVED");
+                match err.kind() {
+                    ErrorKind::Moved | ErrorKind::Ask => {
                         return Next::Err {
                             request: this.request.take().unwrap(),
                             error: err,
                         }
                         .into();
-                    } else if error_code == "TRYAGAIN" || error_code == "CLUSTERDOWN" {
+                    }
+                    ErrorKind::TryAgain | ErrorKind::ClusterDown => {
                         // Sleep and retry.
                         let sleep_duration =
                             Duration::from_millis(2u64.pow(request.retry.clamp(7, 16)) * 10);
@@ -302,13 +302,24 @@ where
                         });
                         return self.poll(cx);
                     }
+                    _ => {
+                        // try again w/ master node if replica fails:
+                        if let Some(route) = &request.info.route {
+                            match route.slot_addr() {
+                                SlotAddr::Master => {}
+                                SlotAddr::Replica => {
+                                    request.info.route =
+                                        Some(Route::new(route.slot(), SlotAddr::Master));
+                                }
+                            }
+                        }
+                        Next::TryNewConnection {
+                            request: this.request.take().unwrap(),
+                            error: Some(err),
+                        }
+                        .into()
+                    }
                 }
-
-                Next::TryNewConnection {
-                    request: this.request.take().unwrap(),
-                    error: Some(err),
-                }
-                .into()
             }
         }
     }
@@ -700,9 +711,9 @@ where
         trace!("start_send");
         let Message { cmd, sender } = msg;
 
-        let slot = cmd.route();
+        let route = cmd.route();
 
-        let info = RequestInfo { cmd, route: slot };
+        let info = RequestInfo { cmd, route };
 
         self.pending_requests.push(PendingRequest {
             retry: 0,
