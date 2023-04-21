@@ -523,31 +523,3 @@ fn test_async_cluster_with_username_and_password() {
     })
     .unwrap();
 }
-
-#[test]
-fn test_async_cluster_stuff() {
-    let name = "node";
-    let MockEnv {
-        runtime,
-        async_connection: mut connection,
-        handler: _handler,
-        ..
-    } = MockEnv::with_client_builder(
-        ClusterClient::builder(vec![&*format!("redis://{name}")]).retries(1),
-        name,
-        move |cmd: &[u8], _port| {
-            respond_startup_with_replica(name, cmd)?;
-            Err(parse_redis_value(b"-ERR\r\n"))
-            // Err(Ok(Value::Data(b"123".to_vec())))
-        },
-    );
-
-    let _value = runtime
-        .block_on(
-            cmd("SET")
-                .arg("test")
-                .arg("123")
-                .query_async::<_, Option<Value>>(&mut connection),
-        )
-        .unwrap();
-}
