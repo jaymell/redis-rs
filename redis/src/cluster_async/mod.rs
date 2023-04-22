@@ -229,12 +229,15 @@ pin_project! {
 
 #[must_use]
 enum Next<I, C> {
-    TryNewConnection {
+    TryAgain {
         request: PendingRequest<I, C>,
         error: Option<RedisError>,
-        addr: Option<String>,
     },
-    Err {
+    ReestablishConnection {
+        request: PendingRequest<I, C>,
+        addr: Arc<String>,
+    },
+    RefreshSlots {
         request: PendingRequest<I, C>,
         error: RedisError,
     },
@@ -257,10 +260,9 @@ where
             RequestStateProj::Future { future } => future,
             RequestStateProj::Sleep { sleep } => {
                 ready!(sleep.poll(cx));
-                return Next::TryNewConnection {
+                return Next::TryAgain {
                     request: self.project().request.take().unwrap(),
                     error: None,
-                    addr: None,
                 }
                 .into();
             }
@@ -285,7 +287,7 @@ where
 
                 match err.kind() {
                     ErrorKind::Moved | ErrorKind::Ask => {
-                        return Next::Err {
+                        return Next::RefreshSlots {
                             request: this.request.take().unwrap(),
                             error: err,
                         }
@@ -305,11 +307,22 @@ where
                         return self.poll(cx);
                     }
                     ErrorKind::IoError => {
-                        Next::TryNewConnection {
-                            request: this.request.take().unwrap(),
-                            error: Some(err),
-                            addr,
-                        }.into()
+                        match addr {
+                            Some(addr) => {
+                                Next::ReestablishConnection { 
+                                    request: this.request.take().unwrap(),
+                                    addr: Arc::new(addr),
+                                }.into()
+                                    }
+                            None => {
+                                Next::RefreshSlots {
+                                    request: this.request.take().unwrap(),
+                                    error: err,
+                                }
+                                .into()
+                            }
+                        }
+
                     }
                     _ => {
                         // try again w/ master node if replica fails:
@@ -322,10 +335,10 @@ where
                                 }
                             }
                         }
-                        Next::TryNewConnection {
+                        // is this appropriate?
+                        Next::TryAgain {
                             request: this.request.take().unwrap(),
                             error: Some(err),
-                            addr: None,
                         }
                         .into()
                     }
@@ -557,7 +570,6 @@ where
     fn try_request(
         &mut self,
         info: &RequestInfo<C>,
-        addr: Option<String>,
     ) -> impl Future<Output = (Option<String>, RedisResult<Response>)> {
         // TODO remove clone by changing the ConnectionLike trait
         let cmd = info.cmd.clone();
@@ -650,14 +662,14 @@ where
             let self_ = &mut *self;
             match result {
                 Next::Done => {}
-                Next::TryNewConnection { request, error, addr } => {
+                Next::TryAgain { request, error} => {
                     if let Some(error) = error {
                         if self_.connections.is_empty() {
                             let _ = request.sender.send(Err(error));
                             continue;
                         }
                     }
-                    let future = self.try_request(&request.info, addr);
+                    let future = self.try_request(&request.info);
                     self.in_flight_requests.push(Box::pin(Request {
                         max_retries: self.cluster_params.retries,
                         request: Some(request),
@@ -666,10 +678,11 @@ where
                         },
                     }));
                 }
-                Next::Err { request, error } => {
+                Next::RefreshSlots { request, error } => {
                     connection_error = Some(error);
                     self.pending_requests.push(request);
                 }
+                Next::ReestablishConnection { request, addr } => todo!(),
             }
         }
 
