@@ -474,7 +474,7 @@ where
         T: MergeResults + std::fmt::Debug,
         F: FnMut(&mut C) -> RedisResult<T>,
     {
-        let mut route = match RoutingInfo::for_routable(cmd) {
+        let route = match RoutingInfo::for_routable(cmd) {
             Some(RoutingInfo::Random) => None,
             Some(RoutingInfo::MasterSlot(slot)) => Some(Route::new(slot, SlotAddr::Master)),
             Some(RoutingInfo::ReplicaSlot(slot)) => Some(Route::new(slot, SlotAddr::Replica)),
@@ -489,7 +489,7 @@ where
         let mut is_asking = false;
         loop {
             // Get target address and response.
-            let (_addr, rv) = {
+            let (addr, rv) = {
                 let mut connections = self.connections.borrow_mut();
                 let (addr, conn) = if let Some(addr) = redirected.take() {
                     let conn = self.get_connection_by_addr(&mut connections, &addr)?;
@@ -519,39 +519,39 @@ where
                     }
                     retries -= 1;
 
-                    match err.kind() {
-                        ErrorKind::Ask => {
+                    if err.is_cluster_error() {
+                        let kind = err.kind();
+
+                        if kind == ErrorKind::Ask {
                             redirected = err.redirect_node().map(|(node, _slot)| node.to_string());
                             is_asking = true;
-                        }
-                        ErrorKind::Moved => {
+                        } else if kind == ErrorKind::Moved {
                             // Refresh slots.
                             self.refresh_slots()?;
                             // Request again.
                             redirected = err.redirect_node().map(|(node, _slot)| node.to_string());
                             is_asking = false;
-                        }
-                        ErrorKind::TryAgain | ErrorKind::ClusterDown => {
+                            continue;
+                        } else if kind == ErrorKind::TryAgain || kind == ErrorKind::ClusterDown {
                             // Sleep and retry.
                             let sleep_time = 2u64.pow(16 - retries.max(9)) * 10;
                             thread::sleep(Duration::from_millis(sleep_time));
+                            continue;
                         }
-                        ErrorKind::IoError => {
-                            if *self.auto_reconnect.borrow() {
-                                self.create_initial_connections()?;
+                    } else if *self.auto_reconnect.borrow() && err.is_io_error() {
+                        if let Ok(mut conn) = self.connect(&addr) {
+                            if conn.check_connection() {
+                                self.connections.borrow_mut().insert(addr, conn);
                             }
                         }
-                        _ => {
-                            // try again w/ master node if replica fails:
-                            if let Some(r) = &mut route {
-                                match r.slot_addr() {
-                                    SlotAddr::Master => {}
-                                    SlotAddr::Replica => {
-                                        route = Some(Route::new(r.slot(), SlotAddr::Master));
-                                    }
-                                }
-                            }
-                        }
+                        continue;
+                    } else {
+                        return Err(err);
+                    }
+
+                    let connections = self.connections.borrow();
+                    if connections.is_empty() {
+                        return Err(err);
                     }
                 }
             }

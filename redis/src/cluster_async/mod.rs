@@ -232,6 +232,7 @@ enum Next<I, C> {
     TryNewConnection {
         request: PendingRequest<I, C>,
         error: Option<RedisError>,
+        addr: Option<String>,
     },
     Err {
         request: PendingRequest<I, C>,
@@ -259,6 +260,7 @@ where
                 return Next::TryNewConnection {
                     request: self.project().request.take().unwrap(),
                     error: None,
+                    addr: None,
                 }
                 .into();
             }
@@ -270,7 +272,7 @@ where
                 self.respond(Ok(item));
                 Next::Done.into()
             }
-            (_addr, Err(err)) => {
+            (addr, Err(err)) => {
                 println!("Request error {}", err);
 
                 let request = this.request.as_mut().unwrap();
@@ -302,6 +304,13 @@ where
                         });
                         return self.poll(cx);
                     }
+                    ErrorKind::IoError => {
+                        Next::TryNewConnection {
+                            request: this.request.take().unwrap(),
+                            error: Some(err),
+                            addr,
+                        }.into()
+                    }
                     _ => {
                         // try again w/ master node if replica fails:
                         if let Some(route) = &request.info.route {
@@ -316,6 +325,7 @@ where
                         Next::TryNewConnection {
                             request: this.request.take().unwrap(),
                             error: Some(err),
+                            addr: None,
                         }
                         .into()
                     }
@@ -511,38 +521,53 @@ where
             if let Some(conn) = self.connections.get(&addr) {
                 return Some((addr, conn.clone()));
             }
-
-            // Create new connection.
-            //
-            let (_, random_conn) = get_random_connection(&self.connections)?; // TODO Only do this lookup if the first check fails
-            let connection_future = {
-                let addr = addr.clone();
-                let params = self.cluster_params.clone();
-                async move {
-                    match connect_and_check(&addr, params).await {
-                        Ok(conn) => conn,
-                        Err(_) => random_conn.await,
-                    }
-                }
-            }
-            .boxed()
-            .shared();
-            self.connections
-                .insert(addr.clone(), connection_future.clone());
-            Some((addr, connection_future))
-        } else {
-            // Return a random connection
-            get_random_connection(&self.connections)
         }
+
+        None
+        //     // Create new connection.
+        //     //
+
+        //     // FIXME THIS IS FUCKED:
+        //     let (_, random_conn) = get_random_connection(&self.connections)?; // TODO Only do this lookup if the first check fails
+
+        //     let connection_future = {
+        //         let addr = addr.clone();
+        //         let params = self.cluster_params.clone();
+        //         async move {
+        //             match connect_and_check(&addr, params).await {
+        //                 Ok(conn) => conn,
+        //                 Err(_) => random_conn.await,
+        //             }
+        //         }
+        //     }
+        //     .boxed()
+        //     .shared();
+
+        //     self.connections
+        //         .insert(addr.clone(), connection_future.clone());
+
+        //     Some((addr, connection_future))
+
+        // } else {
+        //     // Return a random connection
+        //     get_random_connection(&self.connections)
+        // }
     }
 
     fn try_request(
         &mut self,
         info: &RequestInfo<C>,
+        addr: Option<String>,
     ) -> impl Future<Output = (Option<String>, RedisResult<Response>)> {
         // TODO remove clone by changing the ConnectionLike trait
         let cmd = info.cmd.clone();
-        let addr_conn_option = if info.route.is_none() {
+        let addr_conn_option = if let Some(addr) = addr {
+            /////////////////////////////////////////////
+            // FIXME -- get the specific connection
+            get_random_connection(&self.connections)
+            // FIXME -- get the specific connection
+            /////////////////////////////////////////////
+        } else if info.route.is_none() {
             get_random_connection(&self.connections)
         } else {
             self.get_connection(info.route.as_ref().unwrap())
@@ -605,7 +630,7 @@ where
                     continue;
                 }
 
-                let future = self.try_request(&request.info);
+                let future = self.try_request(&request.info, None);
                 self.in_flight_requests.push(Box::pin(Request {
                     max_retries: self.cluster_params.retries,
                     request: Some(request),
@@ -625,14 +650,14 @@ where
             let self_ = &mut *self;
             match result {
                 Next::Done => {}
-                Next::TryNewConnection { request, error } => {
+                Next::TryNewConnection { request, error, addr } => {
                     if let Some(error) = error {
-                        if self_.connections.len() == 0 {
+                        if self_.connections.is_empty() {
                             let _ = request.sender.send(Err(error));
                             continue;
                         }
                     }
-                    let future = self.try_request(&request.info);
+                    let future = self.try_request(&request.info, addr);
                     self.in_flight_requests.push(Box::pin(Request {
                         max_retries: self.cluster_params.retries,
                         request: Some(request),
