@@ -30,7 +30,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{self, Poll},
-    time::Duration, borrow::BorrowMut,
+    time::Duration,
 };
 
 use crate::{
@@ -235,6 +235,7 @@ enum Next<I, C> {
     ReestablishConnection {
         request: PendingRequest<I, C>,
         addr: String,
+        error: RedisError,
     },
     RefreshSlots {
         request: PendingRequest<I, C>,
@@ -304,24 +305,19 @@ where
                         });
                         return self.poll(cx);
                     }
-                    ErrorKind::IoError => {
-                        match addr {
-                            Some(addr) => {
-                                Next::ReestablishConnection { 
-                                    request: this.request.take().unwrap(),
-                                    addr: addr,
-                                }.into()
-                                    }
-                            None => {
-                                Next::RefreshSlots {
-                                    request: this.request.take().unwrap(),
-                                    error: err,
-                                }
-                                .into()
-                            }
+                    ErrorKind::IoError => match addr {
+                        Some(addr) => Next::ReestablishConnection {
+                            request: this.request.take().unwrap(),
+                            addr: addr,
+                            error: err,
                         }
-
-                    }
+                        .into(),
+                        None => Next::RefreshSlots {
+                            request: this.request.take().unwrap(),
+                            error: err,
+                        }
+                        .into(),
+                    },
                     _ => {
                         // try again w/ master node if replica fails:
                         if let Some(route) = &request.info.route {
@@ -620,8 +616,8 @@ where
         }
     }
 
-    fn poll_complete(&mut self, cx: &mut task::Context<'_>) -> Poll<Result<(), RedisError>> {
-        let mut connection_error = None;
+    fn poll_complete(&mut self, cx: &mut task::Context<'_>) -> Poll<PollFlushAction> {
+        let mut poll_flush_action = PollFlushAction::None;
 
         if !self.pending_requests.is_empty() {
             let mut pending_requests = mem::take(&mut self.pending_requests);
@@ -653,7 +649,7 @@ where
             let self_ = &mut *self;
             match result {
                 Next::Done => {}
-                Next::TryAgain { request} => {
+                Next::TryAgain { request } => {
                     let future = self.try_request(&request.info);
                     self.in_flight_requests.push(Box::pin(Request {
                         max_retries: self.cluster_params.retries,
@@ -664,39 +660,37 @@ where
                     }));
                 }
                 Next::RefreshSlots { request, error } => {
-                    connection_error = Some(error);
+                    poll_flush_action =
+                        poll_flush_action.change_state(PollFlushAction::RebuildSlots(error));
                     self.pending_requests.push(request);
                 }
-                Next::ReestablishConnection { request, addr } => {
- 
+                Next::ReestablishConnection {
+                    request,
+                    addr,
+                    error,
+                } => {
+                    poll_flush_action = poll_flush_action
+                        .change_state(PollFlushAction::ReestablishConnection(vec![addr], error));
                     // let future = async {
-                        // let mut conn = self_.connections.borrow_mut().remove(addr.as_str());
+                    // let mut conn = self_.connections.borrow_mut().remove(addr.as_str());
 
-                        // // FIXME
-                        // let mut conn = conn.unwrap().await;
-                        // let Some((addr, conn)) = match check_connection(&mut conn).await {
-                        //     Ok(_) => Some((addr.to_string(), conn)),
-                        //     Err(_) => match connect_and_check(&addr, self.cluster_params.clone()).await {
-                        //         Ok(conn) => Some((addr.to_string(), conn)),
-                        //         Err(_) => None,
-                        //     },
-                        // };
+                    // // FIXME
+                    // let mut conn = conn.unwrap().await;
+                    // let Some((addr, conn)) = match check_connection(&mut conn).await {
+                    //     Ok(_) => Some((addr.to_string(), conn)),
+                    //     Err(_) => match connect_and_check(&addr, self.cluster_params.clone()).await {
+                    //         Ok(conn) => Some((addr.to_string(), conn)),
+                    //         Err(_) => None,
+                    //     },
                     // };
-                    self_.in_flight_requests.push(Box::pin(Request {
-                        max_retries: self.cluster_params.retries,
-                        request: Some(request),
-                        future: RequestState::Future {
-                            future: Box::pin(self.try_request(&request.info)),
-                        },
-                    }));
+                    // };
+                    self.pending_requests.push(request);
                 }
             }
         }
 
-        if let Some(err) = connection_error {
-            Poll::Ready(Err(err))
-        } else if self.in_flight_requests.is_empty() {
-            Poll::Ready(Ok(()))
+        if self.in_flight_requests.is_empty() {
+            Poll::Ready(poll_flush_action)
         } else {
             Poll::Pending
         }
@@ -714,6 +708,29 @@ where
             } else if let Some(request) = self.pending_requests.pop() {
                 let _ = request.sender.send(Err(self.refresh_error.take().unwrap()));
             }
+        }
+    }
+}
+
+enum PollFlushAction {
+    None,
+    RebuildSlots(RedisError),
+    ReestablishConnection(Vec<String>, RedisError),
+}
+
+impl PollFlushAction {
+    fn change_state(self, next_state: PollFlushAction) -> PollFlushAction {
+        match self {
+            PollFlushAction::None => next_state,
+            PollFlushAction::RebuildSlots(e) => PollFlushAction::RebuildSlots(e),
+            PollFlushAction::ReestablishConnection(mut addrs, _) => match next_state {
+                PollFlushAction::RebuildSlots(e) => PollFlushAction::RebuildSlots(e),
+                PollFlushAction::ReestablishConnection(new_addrs, error) => {
+                    addrs.extend(new_addrs);
+                    PollFlushAction::ReestablishConnection(addrs, error)
+                }
+                PollFlushAction::None => next_state,
+            },
         }
     }
 }
@@ -795,9 +812,14 @@ where
                     }
                 }
                 ConnectionState::PollComplete => match ready!(self.poll_complete(cx)) {
-                    Ok(()) => return Poll::Ready(Ok(())),
-                    Err(err) => {
-                        trace!("Recovering {}", err);
+                    PollFlushAction::None => return Poll::Ready(Ok(())),
+                    PollFlushAction::RebuildSlots(err) => {
+                        trace!("Rebuilding slots {}", err);
+                        self.state = ConnectionState::Recover(Box::pin(self.refresh_slots()));
+                    }
+                    PollFlushAction::ReestablishConnection(addrs, err) => {
+                        trace!("Reestablishing conns {}", err);
+                        // FIXME
                         self.state = ConnectionState::Recover(Box::pin(self.refresh_slots()));
                     }
                 },
@@ -811,9 +833,11 @@ where
     ) -> Poll<Result<(), Self::Error>> {
         // Try to drive any in flight requests to completion
         match self.poll_complete(cx) {
-            Poll::Ready(result) => {
-                result.map_err(|_| ())?;
-            }
+            Poll::Ready(poll_flush_action) => match poll_flush_action {
+                PollFlushAction::None => (),
+                PollFlushAction::RebuildSlots(err) => Err(err).map_err(|_| ())?,
+                PollFlushAction::ReestablishConnection(_, err) => Err(err).map_err(|_| ())?,
+            },
             Poll::Pending => (),
         };
         // If we no longer have any requests in flight we are done (skips any reconnection

@@ -502,9 +502,10 @@ where
                     }
                     (addr.to_string(), conn)
                 } else if route.is_none() {
-                    get_random_connection(&mut connections).ok_or(
-                        RedisError::from((ErrorKind::ClusterDown, "Unable to obtain connection")),
-                    )?
+                    get_random_connection(&mut connections).ok_or(RedisError::from((
+                        ErrorKind::ClusterDown,
+                        "Unable to obtain connection",
+                    )))?
                 } else {
                     self.get_connection(&mut connections, route.as_ref().unwrap())?
                 };
