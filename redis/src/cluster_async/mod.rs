@@ -30,7 +30,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{self, Poll},
-    time::Duration,
+    time::Duration, borrow::BorrowMut,
 };
 
 use crate::{
@@ -231,11 +231,10 @@ pin_project! {
 enum Next<I, C> {
     TryAgain {
         request: PendingRequest<I, C>,
-        error: Option<RedisError>,
     },
     ReestablishConnection {
         request: PendingRequest<I, C>,
-        addr: Arc<String>,
+        addr: String,
     },
     RefreshSlots {
         request: PendingRequest<I, C>,
@@ -262,7 +261,6 @@ where
                 ready!(sleep.poll(cx));
                 return Next::TryAgain {
                     request: self.project().request.take().unwrap(),
-                    error: None,
                 }
                 .into();
             }
@@ -311,7 +309,7 @@ where
                             Some(addr) => {
                                 Next::ReestablishConnection { 
                                     request: this.request.take().unwrap(),
-                                    addr: Arc::new(addr),
+                                    addr: addr,
                                 }.into()
                                     }
                             None => {
@@ -338,7 +336,6 @@ where
                         // is this appropriate?
                         Next::TryAgain {
                             request: this.request.take().unwrap(),
-                            error: Some(err),
                         }
                         .into()
                     }
@@ -573,13 +570,7 @@ where
     ) -> impl Future<Output = (Option<String>, RedisResult<Response>)> {
         // TODO remove clone by changing the ConnectionLike trait
         let cmd = info.cmd.clone();
-        let addr_conn_option = if let Some(addr) = addr {
-            /////////////////////////////////////////////
-            // FIXME -- get the specific connection
-            get_random_connection(&self.connections)
-            // FIXME -- get the specific connection
-            /////////////////////////////////////////////
-        } else if info.route.is_none() {
+        let addr_conn_option = if info.route.is_none() {
             get_random_connection(&self.connections)
         } else {
             self.get_connection(info.route.as_ref().unwrap())
@@ -642,7 +633,7 @@ where
                     continue;
                 }
 
-                let future = self.try_request(&request.info, None);
+                let future = self.try_request(&request.info);
                 self.in_flight_requests.push(Box::pin(Request {
                     max_retries: self.cluster_params.retries,
                     request: Some(request),
@@ -662,13 +653,7 @@ where
             let self_ = &mut *self;
             match result {
                 Next::Done => {}
-                Next::TryAgain { request, error} => {
-                    if let Some(error) = error {
-                        if self_.connections.is_empty() {
-                            let _ = request.sender.send(Err(error));
-                            continue;
-                        }
-                    }
+                Next::TryAgain { request} => {
                     let future = self.try_request(&request.info);
                     self.in_flight_requests.push(Box::pin(Request {
                         max_retries: self.cluster_params.retries,
@@ -682,7 +667,29 @@ where
                     connection_error = Some(error);
                     self.pending_requests.push(request);
                 }
-                Next::ReestablishConnection { request, addr } => todo!(),
+                Next::ReestablishConnection { request, addr } => {
+ 
+                    // let future = async {
+                        // let mut conn = self_.connections.borrow_mut().remove(addr.as_str());
+
+                        // // FIXME
+                        // let mut conn = conn.unwrap().await;
+                        // let Some((addr, conn)) = match check_connection(&mut conn).await {
+                        //     Ok(_) => Some((addr.to_string(), conn)),
+                        //     Err(_) => match connect_and_check(&addr, self.cluster_params.clone()).await {
+                        //         Ok(conn) => Some((addr.to_string(), conn)),
+                        //         Err(_) => None,
+                        //     },
+                        // };
+                    // };
+                    self_.in_flight_requests.push(Box::pin(Request {
+                        max_retries: self.cluster_params.retries,
+                        request: Some(request),
+                        future: RequestState::Future {
+                            future: Box::pin(self.try_request(&request.info)),
+                        },
+                    }));
+                }
             }
         }
 
