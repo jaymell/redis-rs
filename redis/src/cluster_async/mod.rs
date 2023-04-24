@@ -171,8 +171,12 @@ struct Message<C> {
     sender: oneshot::Sender<RedisResult<Response>>,
 }
 
-type RecoverFuture<C> =
-    BoxFuture<'static, Result<(SlotMap, ConnectionMap<C>), (RedisError, ConnectionMap<C>)>>;
+enum RecoverFuture<C> {
+    RecoverSlots(
+        BoxFuture<'static, Result<(SlotMap, ConnectionMap<C>), (RedisError, ConnectionMap<C>)>>,
+    ),
+    RecoverConns(BoxFuture<'static, ConnectionMap<C>>),
+}
 
 enum ConnectionState<C> {
     PollComplete,
@@ -420,6 +424,48 @@ where
         Ok(connections)
     }
 
+    fn refresh_connections(
+        &mut self,
+        addrs: Option<Vec<String>>,
+    ) -> impl Future<Output = ConnectionMap<C>> {
+        let mut connections = mem::take(&mut self.connections);
+        let cluster_params = self.cluster_params.clone();
+        let addrs = addrs.unwrap_or_else(|| {
+            let mut addrs = self.slots.values().flatten().collect::<Vec<_>>();
+            addrs.sort_unstable();
+            addrs.dedup();
+            addrs.into_iter().map(|a| a.clone()).collect()
+        });
+
+        async move {
+            for addr in addrs {
+                if !connections.contains_key(&addr) {
+                    let new_connection = if let Some(conn) = connections.remove(&addr) {
+                        let mut conn = conn.await;
+                        match check_connection(&mut conn).await {
+                            Ok(_) => Some(conn),
+                            Err(_) => {
+                                match connect_and_check(&addr, cluster_params.clone()).await {
+                                    Ok(conn) => Some(conn),
+                                    Err(_) => None,
+                                }
+                            }
+                        }
+                    } else {
+                        match connect_and_check(&addr, cluster_params.clone()).await {
+                            Ok(conn) => Some(conn),
+                            Err(_) => None,
+                        }
+                    };
+                    if let Some(new_connection) = new_connection {
+                        connections.insert(addr, async { new_connection }.boxed().shared());
+                    }
+                }
+            }
+            connections
+        }
+    }
+
     // Query a node to discover slot-> master mappings.
     fn refresh_slots(
         &mut self,
@@ -427,6 +473,7 @@ where
     {
         let mut connections = mem::take(&mut self.connections);
         let cluster_params = self.cluster_params.clone();
+        let new_connections = self.refresh_connections(None);
 
         async move {
             let mut result = Ok(SlotMap::new());
@@ -454,37 +501,7 @@ where
                 Err(err) => return Err((err, connections)),
             };
 
-            let mut nodes = slots.values().flatten().collect::<Vec<_>>();
-            nodes.sort_unstable();
-            nodes.dedup();
-
-            // Remove dead connections and connect to new nodes if necessary
-            let mut new_connections = HashMap::with_capacity(slots.len());
-
-            for addr in nodes {
-                if !new_connections.contains_key(addr) {
-                    let new_connection = if let Some(conn) = connections.remove(addr) {
-                        let mut conn = conn.await;
-                        match check_connection(&mut conn).await {
-                            Ok(_) => Some((addr.to_string(), conn)),
-                            Err(_) => match connect_and_check(addr, cluster_params.clone()).await {
-                                Ok(conn) => Some((addr.to_string(), conn)),
-                                Err(_) => None,
-                            },
-                        }
-                    } else {
-                        match connect_and_check(addr, cluster_params.clone()).await {
-                            Ok(conn) => Some((addr.to_string(), conn)),
-                            Err(_) => None,
-                        }
-                    };
-                    if let Some((addr, new_connection)) = new_connection {
-                        new_connections.insert(addr, async { new_connection }.boxed().shared());
-                    }
-                }
-            }
-
-            Ok((slots, new_connections))
+            Ok((slots, new_connections.await))
         }
     }
 
@@ -595,24 +612,41 @@ where
         cx: &mut task::Context<'_>,
         mut future: RecoverFuture<C>,
     ) -> Poll<Result<(), RedisError>> {
-        match future.as_mut().poll(cx) {
-            Poll::Ready(Ok((slots, connections))) => {
-                trace!("Recovered with {} connections!", connections.len());
-                self.slots = slots;
-                self.connections = connections;
-                self.state = ConnectionState::PollComplete;
-                Poll::Ready(Ok(()))
-            }
-            Poll::Pending => {
-                self.state = ConnectionState::Recover(future);
-                trace!("Recover not ready");
-                Poll::Pending
-            }
-            Poll::Ready(Err((err, connections))) => {
-                self.connections = connections;
-                self.state = ConnectionState::Recover(Box::pin(self.refresh_slots()));
-                Poll::Ready(Err(err))
-            }
+        match future {
+            RecoverFuture::RecoverSlots(mut future) => match future.as_mut().poll(cx) {
+                Poll::Ready(Ok((slots, connections))) => {
+                    trace!("Recovered with {} connections!", connections.len());
+                    self.slots = slots;
+                    self.connections = connections;
+                    self.state = ConnectionState::PollComplete;
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Pending => {
+                    self.state = ConnectionState::Recover(RecoverFuture::RecoverSlots((future)));
+                    trace!("Recover not ready");
+                    Poll::Pending
+                }
+                Poll::Ready(Err((err, connections))) => {
+                    self.connections = connections;
+                    self.state = ConnectionState::Recover(RecoverFuture::RecoverSlots(Box::pin(
+                        self.refresh_slots(),
+                    )));
+                    Poll::Ready(Err(err))
+                }
+            },
+            RecoverFuture::RecoverConns(mut future) => match future.as_mut().poll(cx) {
+                Poll::Ready(connections) => {
+                    trace!("Reestablished connections!");
+                    self.connections = connections;
+                    self.state = ConnectionState::PollComplete;
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Pending => {
+                    self.state = ConnectionState::Recover(RecoverFuture::RecoverConns(future));
+                    trace!("Recover not ready");
+                    Poll::Pending
+                }
+            },
         }
     }
 
@@ -671,19 +705,7 @@ where
                 } => {
                     poll_flush_action = poll_flush_action
                         .change_state(PollFlushAction::ReestablishConnection(vec![addr], error));
-                    // let future = async {
-                    // let mut conn = self_.connections.borrow_mut().remove(addr.as_str());
 
-                    // // FIXME
-                    // let mut conn = conn.unwrap().await;
-                    // let Some((addr, conn)) = match check_connection(&mut conn).await {
-                    //     Ok(_) => Some((addr.to_string(), conn)),
-                    //     Err(_) => match connect_and_check(&addr, self.cluster_params.clone()).await {
-                    //         Ok(conn) => Some((addr.to_string(), conn)),
-                    //         Err(_) => None,
-                    //     },
-                    // };
-                    // };
                     self.pending_requests.push(request);
                 }
             }
@@ -815,12 +837,16 @@ where
                     PollFlushAction::None => return Poll::Ready(Ok(())),
                     PollFlushAction::RebuildSlots(err) => {
                         trace!("Rebuilding slots {}", err);
-                        self.state = ConnectionState::Recover(Box::pin(self.refresh_slots()));
+                        // self.state = ConnectionState::Recover(Box::pin(async { let a = self.refresh_slots().await?; Ok(Some(a)) }));
                     }
                     PollFlushAction::ReestablishConnection(addrs, err) => {
                         trace!("Reestablishing conns {}", err);
-                        // FIXME
-                        self.state = ConnectionState::Recover(Box::pin(self.refresh_slots()));
+                        // let future = {
+                        //     let mut connections = mem::take(&mut self.connections);
+                        //     let cluster_params = self.cluster_params.clone();
+
+                        // })};
+                        // self.state = ConnectionState::Recover(future);
                     }
                 },
             }
