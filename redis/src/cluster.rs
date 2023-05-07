@@ -520,40 +520,42 @@ where
                     }
                     retries -= 1;
 
-                    if err.is_cluster_error() {
-                        let kind = err.kind();
-
-                        if kind == ErrorKind::Ask {
+                    match err.kind() {
+                        ErrorKind::Ask => {
                             redirected = err.redirect_node().map(|(node, _slot)| node.to_string());
                             is_asking = true;
-                        } else if kind == ErrorKind::Moved {
+                        }
+                        ErrorKind::Moved => {
                             // Refresh slots.
                             self.refresh_slots()?;
                             // Request again.
                             redirected = err.redirect_node().map(|(node, _slot)| node.to_string());
                             is_asking = false;
                             continue;
-                        } else if kind == ErrorKind::TryAgain || kind == ErrorKind::ClusterDown {
+                        }
+                        ErrorKind::TryAgain | ErrorKind::ClusterDown => {
                             // Sleep and retry.
                             let sleep_time = 2u64.pow(16 - retries.max(9)) * 10;
                             thread::sleep(Duration::from_millis(sleep_time));
                             continue;
                         }
-                    } else if *self.auto_reconnect.borrow() && err.is_io_error() {
-                        if let Ok(mut conn) = self.connect(&addr) {
-                            if conn.check_connection() {
-                                self.connections.borrow_mut().insert(addr, conn);
+                        ErrorKind::IoError => {
+                            if *self.auto_reconnect.borrow() {
+                                if let Ok(mut conn) = self.connect(&addr) {
+                                    if conn.check_connection() {
+                                        self.connections.borrow_mut().insert(addr, conn);
+                                    }
+                                }
+                                continue;
                             }
                         }
-                        continue;
-                    } /*else {
-                          return Err(err);
-                      }*/
-
+                        _ => {
+                            return Err(err);
+                        }
+                    }
                     let connections = self.connections.borrow();
                     if connections.is_empty() {
                         return Err(err);
-                    }
                 }
             }
         }
