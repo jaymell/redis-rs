@@ -312,7 +312,7 @@ fn test_cluster_exhaust_retries() {
             move |cmd: &[u8], _| {
                 respond_startup(name, cmd)?;
                 requests.fetch_add(1, atomic::Ordering::SeqCst);
-                Err(parse_redis_value(b"-BUSYLOADING mock\r\n"))
+                Err(parse_redis_value(b"-LOADING mock\r\n"))
             }
         },
     );
@@ -321,7 +321,7 @@ fn test_cluster_exhaust_retries() {
 
     assert_eq!(
         result.map_err(|err| err.to_string()),
-        Err("BUSYLOADING: mock".to_string())
+        Err("An error was signalled by the server: mock".to_string())
     );
     assert_eq!(requests.load(atomic::Ordering::SeqCst), 3);
 }
@@ -496,4 +496,33 @@ fn test_cluster_io_error() {
     let value = cmd("GET").arg("test").query::<Option<i32>>(&mut connection);
 
     assert_eq!(value, Ok(Some(123)));
+}
+
+#[test]
+fn test_cluster_non_retryable_error_should_not_retry() {
+    let name = "node";
+    let completed = Arc::new(AtomicI32::new(0));
+    let MockEnv {
+        mut connection,
+        handler: _handler,
+        ..
+    } = MockEnv::with_client_builder(
+        ClusterClient::builder(vec![&*format!("redis://{name}")]),
+        name,
+        {
+            let completed = completed.clone();
+            move |cmd: &[u8], _| {
+                respond_startup_two_nodes(name, cmd)?;
+                // Error twice with io-error, ensure connection is reestablished w/out calling
+                // other node (i.e., not doing a full slot rebuild)
+                completed.fetch_add(1, Ordering::SeqCst);
+                Err(parse_redis_value(b"-ERR mock\r\n"))
+            }
+        },
+    );
+
+    let value = cmd("GET").arg("test").query::<Option<i32>>(&mut connection);
+
+    assert!(value.is_err());
+    assert_eq!(completed.load(Ordering::SeqCst), 1);
 }

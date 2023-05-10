@@ -525,39 +525,6 @@ fn test_async_cluster_with_username_and_password() {
 }
 
 #[test]
-#[ignore]
-fn test_async_cluster_replica_read_failure_should_fall_back_to_master() {
-    let name = "node";
-
-    let MockEnv {
-        runtime,
-        async_connection: mut connection,
-        handler: _handler,
-        ..
-    } = MockEnv::with_client_builder(
-        ClusterClient::builder(vec![&*format!("redis://{name}")])
-            .retries(1)
-            .read_from_replicas(),
-        name,
-        move |cmd: &[u8], port| {
-            respond_startup_with_replica(name, cmd)?;
-            match port {
-                6379 => Err(Ok(Value::Data(b"123".to_vec()))),
-                _ => Err(parse_redis_value(b"-ERR mock\r\n")),
-            }
-        },
-    );
-
-    let value = runtime.block_on(
-        cmd("GET")
-            .arg("test")
-            .query_async::<_, Option<i32>>(&mut connection),
-    );
-
-    assert_eq!(value, Ok(Some(123)));
-}
-
-#[test]
 fn test_async_cluster_io_error() {
     let name = "node";
     let completed = Arc::new(AtomicI32::new(0));
@@ -593,4 +560,38 @@ fn test_async_cluster_io_error() {
     );
 
     assert_eq!(value, Ok(Some(123)));
+}
+
+#[test]
+fn test_async_cluster_non_retryable_error_should_not_retry() {
+    let name = "node";
+    let completed = Arc::new(AtomicI32::new(0));
+    let MockEnv {
+        async_connection: mut connection,
+        handler: _handler,
+        runtime,
+        ..
+    } = MockEnv::with_client_builder(
+        ClusterClient::builder(vec![&*format!("redis://{name}")]),
+        name,
+        {
+            let completed = completed.clone();
+            move |cmd: &[u8], _| {
+                respond_startup_two_nodes(name, cmd)?;
+                // Error twice with io-error, ensure connection is reestablished w/out calling
+                // other node (i.e., not doing a full slot rebuild)
+                completed.fetch_add(1, Ordering::SeqCst);
+                Err(parse_redis_value(b"-ERR mock\r\n"))
+            }
+        },
+    );
+
+    let value = runtime.block_on(
+        cmd("GET")
+            .arg("test")
+            .query_async::<_, Option<i32>>(&mut connection),
+    );
+
+    assert!(value.is_err());
+    assert_eq!(completed.load(Ordering::SeqCst), 1);
 }

@@ -550,12 +550,11 @@ where
                             }
                         }
                         _ => {
-                            return Err(err);
+                            if !err.is_retryable() {
+                                return Err(err);
+                            }
                         }
                     }
-                    let connections = self.connections.borrow();
-                    if connections.is_empty() {
-                        return Err(err);
                 }
             }
         }

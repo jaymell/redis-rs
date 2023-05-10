@@ -317,21 +317,14 @@ where
                         .into(),
                     },
                     _ => {
-                        // try again w/ master node if replica fails:
-                        // if let Some(route) = &request.info.route {
-                        //     match route.slot_addr() {
-                        //         SlotAddr::Master => {}
-                        //         SlotAddr::Replica => {
-                        //             request.info.route =
-                        //                 Some(Route::new(route.slot(), SlotAddr::Master));
-                        //         }
-                        //     }
-                        // }
-                        // is this appropriate?
-                        Next::TryAgain {
-                            request: this.request.take().unwrap(),
+                        if err.is_retryable() {
+                            Next::TryAgain {
+                                request: this.request.take().unwrap(),
+                            }
+                            .into()
+                        } else {
+                            return Next::Done.into();
                         }
-                        .into()
                     }
                 }
             }
