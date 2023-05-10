@@ -732,9 +732,9 @@ pub enum TlsMode {
     Insecure,
 }
 
-fn get_random_connection<'a, C: ConnectionLike + Connect + Sized>(
-    connections: &'a mut HashMap<String, C>,
-) -> Option<(String, &'a mut C)> {
+fn get_random_connection<C: ConnectionLike + Connect + Sized>(
+    connections: &mut HashMap<String, C>,
+) -> Option<(String, &mut C)> {
     let addr = connections.keys().choose(&mut thread_rng())?.to_string();
     let con = connections.get_mut(&addr)?;
     Some((addr, con))

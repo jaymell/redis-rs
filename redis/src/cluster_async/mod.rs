@@ -174,6 +174,7 @@ struct Message<C> {
 
 enum RecoverFuture<C> {
     RecoverSlots(
+        #[allow(clippy::complexity)]
         BoxFuture<'static, Result<(SlotMap, ConnectionMap<C>), (RedisError, ConnectionMap<C>)>>,
     ),
     RecoverConns(BoxFuture<'static, ConnectionMap<C>>),
@@ -286,12 +287,10 @@ where
                 request.retry = request.retry.saturating_add(1);
 
                 match err.kind() {
-                    ErrorKind::Moved | ErrorKind::Ask => {
-                        return Next::RefreshSlots {
-                            request: this.request.take().unwrap(),
-                        }
-                        .into();
+                    ErrorKind::Moved | ErrorKind::Ask => Next::RefreshSlots {
+                        request: this.request.take().unwrap(),
                     }
+                    .into(),
                     ErrorKind::TryAgain | ErrorKind::ClusterDown => {
                         // Sleep and retry.
                         let sleep_duration =
@@ -303,12 +302,12 @@ where
                             #[cfg(all(not(feature = "tokio-comp"), feature = "async-std-comp"))]
                             sleep: Box::pin(async_std::task::sleep(sleep_duration)),
                         });
-                        return self.poll(cx);
+                        self.poll(cx)
                     }
                     ErrorKind::IoError => match addr {
                         Some(addr) => Next::Reconnect {
                             request: this.request.take().unwrap(),
-                            addr: addr,
+                            addr,
                         }
                         .into(),
                         None => Next::RefreshSlots {
@@ -323,7 +322,7 @@ where
                             }
                             .into()
                         } else {
-                            return Next::Done.into();
+                            Next::Done.into()
                         }
                     }
                 }
@@ -1053,9 +1052,7 @@ where
     Ok(())
 }
 
-fn get_random_connection<'a, C>(
-    connections: &'a ConnectionMap<C>,
-) -> Option<(String, ConnectionFuture<C>)>
+fn get_random_connection<C>(connections: &ConnectionMap<C>) -> Option<(String, ConnectionFuture<C>)>
 where
     C: Clone,
 {
