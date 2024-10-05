@@ -121,13 +121,19 @@ use crate::{
     FromRedisValue, IntoConnectionInfo, RedisConnectionInfo, TlsMode, Value,
 };
 
+#[cfg(not(feature = "aio"))]
+type Conn = Connection;
+
+#[cfg(feature = "aio")]
+type Conn = AsyncConnection;
+
 /// The Sentinel type, serves as a special purpose client which builds other clients on
 /// demand.
 pub struct Sentinel {
     sentinels_connection_info: Vec<ConnectionInfo>,
-    connections_cache: Vec<Option<Connection>>,
-    #[cfg(feature = "aio")]
-    async_connections_cache: Vec<Option<AsyncConnection>>,
+    sentinel_conn_cache: Vec<Option<Conn>>,
+    sentinel_client_cache: HashMap<String, Client>,
+    redis_conn_cache: HashMap<String, Conn>,
     replica_start_index: usize,
 }
 
@@ -459,8 +465,8 @@ impl Sentinel {
 
             Ok(Sentinel {
                 sentinels_connection_info,
-                connections_cache,
-                async_connections_cache,
+                sentinel_conn_cache: connections_cache,
+                async_sentinel_conn_cache: async_connections_cache,
                 replica_start_index: random_replica_index(NonZeroUsize::new(1000000).unwrap()),
             })
         }
@@ -490,7 +496,7 @@ impl Sentinel {
         for (connection_info, cached_connection) in self
             .sentinels_connection_info
             .iter()
-            .zip(self.connections_cache.iter_mut())
+            .zip(self.sentinel_conn_cache.iter_mut())
         {
             match try_single_sentinel(cmd.clone(), connection_info, cached_connection) {
                 Ok(result) => {
@@ -588,7 +594,7 @@ impl Sentinel {
         for (connection_info, cached_connection) in self
             .sentinels_connection_info
             .iter()
-            .zip(self.async_connections_cache.iter_mut())
+            .zip(self.async_sentinel_conn_cache.iter_mut())
         {
             match async_try_single_sentinel(cmd.clone(), connection_info, cached_connection).await {
                 Ok(result) => {
@@ -644,6 +650,8 @@ impl Sentinel {
         let address = self
             .async_find_master_address(service_name, node_connection_info.unwrap_or_default())
             .await?;
+        let addr_str = address.addr.to_string();
+
         Client::open(address)
     }
 
